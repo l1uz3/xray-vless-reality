@@ -28,7 +28,7 @@ apt-get -y install curl wget -qq
 # 说明
 echo
 echo -e "$yellow此脚本仅兼容于Debian 10+系统. 如果你的系统不符合,请Ctrl+C退出脚本$none"
-echo -e "可以去 ${cyan}https://github.com/crazypeace/xray-vless-reality${none} 查看脚本整体思路和关键命令, 以便针对你自己的系统做出调整."
+echo -e "可以去 ${cyan}https://github.com/l1uz3/xray-vless-reality${none} 查看脚本整体思路和关键命令, 以便针对你自己的系统做出调整."
 echo -e "有问题加群 ${cyan}https://t.me/+q5WPfGjtwukyZjhl${none}"
 echo -e "本脚本支持带参数执行, 省略交互过程, 详见GitHub."
 echo "----------------------------------------------------------------"
@@ -115,11 +115,9 @@ apt install -y curl wget sudo jq qrencode net-tools lsof
 
 # Xray官方脚本 安装最新版本
 echo
-echo -e "${yellow}Xray官方脚本安装 v25.10.15 版本$none"
-# echo -e "${yellow}Xray官方脚本安装最新版本$none"
+echo -e "${yellow}Xray官方脚本安装最新版本$none"
 echo "----------------------------------------------------------------"
-bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install --version v25.10.15
-# bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
 
 # 更新 geodata
 bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install-geodata
