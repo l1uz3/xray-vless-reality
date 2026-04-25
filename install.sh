@@ -59,6 +59,14 @@ install_warp_by_stack() {
   fi
 }
 
+build_jq_readable_config() {
+  src_config="$1"
+  tmp_config=$(mktemp)
+  # jq 不支持 // 注释, 这里在读取前去掉整行注释与行尾注释
+  sed -E 's@[[:space:]]+//.*$@@; /^[[:space:]]*//.*/d' "${src_config}" > "${tmp_config}"
+  echo "${tmp_config}"
+}
+
 list_nodes_overview() {
   config_file="/usr/local/etc/xray/config.json"
   if [[ ! -f "${config_file}" ]]; then
@@ -66,13 +74,17 @@ list_nodes_overview() {
     return 1
   fi
 
-  node_count=$(jq '.inbounds[0].settings.clients | length' "${config_file}" 2>/dev/null)
+  jq_config_file=$(build_jq_readable_config "${config_file}")
+
+  node_count=$(jq '.inbounds[0].settings.clients | length' "${jq_config_file}" 2>/dev/null)
   if [[ -z "${node_count}" || "${node_count}" == "null" || ! "${node_count}" =~ ^[0-9]+$ ]]; then
+    rm -f "${jq_config_file}"
     warn "当前没有可管理的节点"
     return 1
   fi
 
   if [[ ${node_count} -eq 0 ]]; then
+    rm -f "${jq_config_file}"
     warn "当前没有可管理的节点"
     return 1
   fi
@@ -81,12 +93,12 @@ list_nodes_overview() {
   echo "---------- 当前节点列表 ----------"
   for ((i=0; i<node_count; i++)); do
     idx=$((i + 1))
-    node_uuid=$(jq -r ".inbounds[0].settings.clients[${i}].id // \"\"" "${config_file}")
-    node_email=$(jq -r ".inbounds[0].settings.clients[${i}].email // \"\"" "${config_file}")
+    node_uuid=$(jq -r ".inbounds[0].settings.clients[${i}].id // \"\"" "${jq_config_file}")
+    node_email=$(jq -r ".inbounds[0].settings.clients[${i}].email // \"\"" "${jq_config_file}")
 
     node_outbound="direct"
     if [[ -n "${node_email}" ]]; then
-      node_outbound=$(jq -r --arg email "${node_email}" '.routing.rules[]? | select(((.user // []) | index($email)) != null) | .outboundTag' "${config_file}" | head -n 1)
+      node_outbound=$(jq -r --arg email "${node_email}" '.routing.rules[]? | select(((.user // []) | index($email)) != null) | .outboundTag' "${jq_config_file}" | head -n 1)
       [[ -z "${node_outbound}" ]] && node_outbound="direct"
     fi
 
@@ -99,6 +111,7 @@ list_nodes_overview() {
     echo -e "$yellow ${idx}. ${node_title}${none} UUID=${cyan}${node_uuid}${none} Outbound=${magenta}${node_outbound}${none}"
   done
   echo "----------------------------------"
+  rm -f "${jq_config_file}"
 }
 
 delete_node_by_index() {
@@ -112,25 +125,30 @@ delete_node_by_index() {
 
   delete_idx=$((delete_idx_1based - 1))
 
-  node_count=$(jq '.inbounds[0].settings.clients | length' "${config_file}" 2>/dev/null)
+  jq_config_file=$(build_jq_readable_config "${config_file}")
+
+  node_count=$(jq '.inbounds[0].settings.clients | length' "${jq_config_file}" 2>/dev/null)
   if [[ -z "${node_count}" || ! "${node_count}" =~ ^[0-9]+$ || ${delete_idx_1based} -lt 1 || ${delete_idx_1based} -gt ${node_count} ]]; then
+    rm -f "${jq_config_file}"
     error
     return 1
   fi
 
   if [[ ${delete_idx_1based} -eq 1 ]]; then
+    rm -f "${jq_config_file}"
     warn "主节点不可删除, 只允许删除额外节点"
     return 1
   fi
 
-  delete_email=$(jq -r ".inbounds[0].settings.clients[${delete_idx}].email // \"\"" "${config_file}")
+  delete_email=$(jq -r ".inbounds[0].settings.clients[${delete_idx}].email // \"\"" "${jq_config_file}")
   delete_outbound=""
   if [[ -n "${delete_email}" ]]; then
-    delete_outbound=$(jq -r --arg email "${delete_email}" '.routing.rules[]? | select(((.user // []) | index($email)) != null) | .outboundTag' "${config_file}" | head -n 1)
+    delete_outbound=$(jq -r --arg email "${delete_email}" '.routing.rules[]? | select(((.user // []) | index($email)) != null) | .outboundTag' "${jq_config_file}" | head -n 1)
   fi
 
   tmp_file=$(mktemp)
-  jq --argjson idx ${delete_idx} 'del(.inbounds[0].settings.clients[$idx])' "${config_file}" > "${tmp_file}" && mv "${tmp_file}" "${config_file}"
+  jq --argjson idx ${delete_idx} 'del(.inbounds[0].settings.clients[$idx])' "${jq_config_file}" > "${tmp_file}" && mv "${tmp_file}" "${config_file}"
+  rm -f "${jq_config_file}"
 
   if [[ -n "${delete_email}" ]]; then
     tmp_file=$(mktemp)
@@ -161,19 +179,24 @@ modify_node_uuid_by_index() {
 
   modify_idx=$((modify_idx_1based - 1))
 
-  node_count=$(jq '.inbounds[0].settings.clients | length' "${config_file}" 2>/dev/null)
+  jq_config_file=$(build_jq_readable_config "${config_file}")
+
+  node_count=$(jq '.inbounds[0].settings.clients | length' "${jq_config_file}" 2>/dev/null)
   if [[ -z "${node_count}" || ! "${node_count}" =~ ^[0-9]+$ || ${modify_idx_1based} -lt 1 || ${modify_idx_1based} -gt ${node_count} ]]; then
+    rm -f "${jq_config_file}"
     error
     return 1
   fi
 
   if ! is_valid_uuid "${new_uuid}"; then
+    rm -f "${jq_config_file}"
     error
     return 1
   fi
 
   tmp_file=$(mktemp)
-  jq --argjson idx ${modify_idx} --arg uuid "${new_uuid}" '.inbounds[0].settings.clients[$idx].id = $uuid' "${config_file}" > "${tmp_file}" && mv "${tmp_file}" "${config_file}"
+  jq --argjson idx ${modify_idx} --arg uuid "${new_uuid}" '.inbounds[0].settings.clients[$idx].id = $uuid' "${jq_config_file}" > "${tmp_file}" && mv "${tmp_file}" "${config_file}"
+  rm -f "${jq_config_file}"
   restart_xray_service
   echo -e "$green 已修改节点 ${modify_idx_1based} 的UUID$none"
 }
@@ -371,7 +394,7 @@ pause
 
 # 准备工作
 apt update
-apt install -y curl wget sudo jq qrencode net-tools lsof
+apt install -y curl wget sudo jq net-tools lsof
 
 # Xray官方脚本 安装最新版本
 echo
@@ -1088,15 +1111,8 @@ for idx in "${!all_uuids[@]}"; do
   echo -e "$yellow ${node_title} 出站 (Outbound) = ${cyan}${node_outbound}${none}"
   echo -e "${cyan}${current_url}${none}"
   echo
-  echo "以下两个二维码完全一样的内容 (${node_title})"
-  qrencode -t UTF8 "${current_url}"
-  qrencode -t ANSI "${current_url}"
-  echo
 
   echo "${node_title} (${node_outbound}): ${current_url}" >> ~/_vless_reality_url_
-  echo "以下两个二维码完全一样的内容 (${node_title})" >> ~/_vless_reality_url_
-  qrencode -t UTF8 "${current_url}" >> ~/_vless_reality_url_
-  qrencode -t ANSI "${current_url}" >> ~/_vless_reality_url_
   echo >> ~/_vless_reality_url_
 done
 
