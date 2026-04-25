@@ -250,6 +250,41 @@ pause() {
     echo
 }
 
+is_xray_installed() {
+  command -v xray >/dev/null 2>&1
+}
+
+install_base_dependencies() {
+  echo
+  echo -e "$yellow安装基础依赖$none"
+  echo "----------------------------------------------------------------"
+  apt update
+  apt install -y curl wget sudo jq net-tools lsof
+}
+
+install_or_update_xray() {
+  install_base_dependencies
+
+  echo
+  echo -e "${yellow}安装/更新 Xray$none"
+  echo "----------------------------------------------------------------"
+  bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+
+  echo
+  echo -e "${yellow}更新 geodata$none"
+  echo "----------------------------------------------------------------"
+  bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install-geodata
+}
+
+ensure_xray_ready() {
+  if is_xray_installed; then
+    return 0
+  fi
+
+  warn "未检测到 xray，配置前先自动安装一次"
+  install_or_update_xray
+}
+
 # 确保有 curl 和 wget
 apt-get -y install curl wget jq -qq
 
@@ -368,14 +403,15 @@ fi
 if [[ $# -lt 1 ]]; then
   echo
   echo -e "$yellow 功能菜单 $none"
-  echo -e "${cyan}1${none}. 安装/重建节点配置"
-  echo -e "${cyan}2${none}. 节点管理(查看/删除/修改UUID)"
+  echo -e "${cyan}1${none}. 配置/重建节点配置"
+  echo -e "${cyan}2${none}. 安装/更新 Xray"
+  echo -e "${cyan}3${none}. 节点管理(查看/删除/修改UUID)"
 
   while :; do
-    read -p "$(echo -e "请选择功能 [1-2] (默认Default ${cyan}1${none}):")" entry_mode
+    read -p "$(echo -e "请选择功能 [1-3] (默认Default ${cyan}1${none}):")" entry_mode
     [ -z "${entry_mode}" ] && entry_mode=1
     case ${entry_mode} in
-    1 | 2)
+    1 | 2 | 3)
       break
       ;;
     *)
@@ -386,24 +422,23 @@ if [[ $# -lt 1 ]]; then
 fi
 
 if [[ ${entry_mode} == 2 ]]; then
+  pause
+  install_or_update_xray
+  exit 0
+fi
+
+if [[ ${entry_mode} == 3 ]]; then
   node_management_menu
   exit 0
 fi
 
 pause
 
-# 准备工作
-apt update
-apt install -y curl wget sudo jq net-tools lsof
-
-# Xray官方脚本 安装最新版本
-echo
-echo -e "${yellow}Xray官方脚本安装最新版本$none"
-echo "----------------------------------------------------------------"
-bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
-
-# 更新 geodata
-bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install-geodata
+if [[ $# -lt 1 ]]; then
+  ensure_xray_ready
+else
+  install_or_update_xray
+fi
 
 # 如果脚本带参数执行的, 要在安装了xray之后再生成默认私钥公钥shortID
 if [[ -n $uuid ]]; then
@@ -468,50 +503,6 @@ if [[ -z $netstack ]]; then
   fi
 fi
 
-# 端口
-if [[ -z $port ]]; then
-  default_port=443
-  while :; do
-    read -p "$(echo -e "请输入端口 [${magenta}1-65535${none}] Input port (默认Default ${cyan}${default_port}$none):")" port
-    [ -z "$port" ] && port=$default_port
-    case $port in
-    [1-9] | [1-9][0-9] | [1-9][0-9][0-9] | [1-9][0-9][0-9][0-9] | [1-5][0-9][0-9][0-9][0-9] | 6[0-4][0-9][0-9][0-9] | 65[0-4][0-9][0-9] | 655[0-3][0-5])
-      echo
-      echo
-      echo -e "$yellow 端口 (Port) = ${cyan}${port}${none}"
-      echo "----------------------------------------------------------------"
-      echo
-      break
-      ;;
-    *)
-      error
-      ;;
-    esac
-  done
-fi
-
-# Xray UUID
-if [[ -z $uuid ]]; then
-  while :; do
-    echo -e "请输入 "$yellow"UUID"$none" "
-    read -p "$(echo -e "(默认ID: ${cyan}${default_uuid}$none):")" uuid
-    [ -z "$uuid" ] && uuid=$default_uuid
-    case $(echo -n $uuid | sed -E 's/[a-z0-9]{8}-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{12}//g') in
-    "")
-        echo
-        echo
-        echo -e "$yellow UUID = $cyan$uuid$none"
-        echo "----------------------------------------------------------------"
-        echo
-        break
-        ;;
-    *)
-        error
-        ;;
-    esac
-  done
-fi
-
 # 快捷菜单(仅交互模式)
 if [[ $# -lt 1 ]]; then
   echo
@@ -567,6 +558,45 @@ if [[ $# -lt 1 ]]; then
       esac
     done
   fi
+fi
+
+# 端口
+if [[ -z $port ]]; then
+  default_port=443
+  while :; do
+    read -p "$(echo -e "请输入端口 [${magenta}1-65535${none}] Input port (默认Default ${cyan}${default_port}$none):")" port
+    [ -z "$port" ] && port=$default_port
+    if is_valid_port "$port"; then
+      echo
+      echo
+      echo -e "$yellow 端口 (Port) = ${cyan}${port}${none}"
+      echo "----------------------------------------------------------------"
+      echo
+      break
+    else
+      error
+    fi
+  done
+fi
+
+# Xray UUID
+if [[ -z $uuid ]]; then
+  while :; do
+    echo -e "请输入 "$yellow"UUID"$none" "
+    read -p "$(echo -e "(默认ID: ${cyan}${default_uuid}$none):")" uuid
+    [ -z "$uuid" ] && uuid=$default_uuid
+    uuid=$(echo -n "$uuid" | tr 'A-Z' 'a-z' | tr -d '[:space:]')
+    if is_valid_uuid "$uuid"; then
+      echo
+      echo
+      echo -e "$yellow UUID = $cyan$uuid$none"
+      echo "----------------------------------------------------------------"
+      echo
+      break
+    else
+      error
+    fi
+  done
 fi
 
 # WARP菜单
