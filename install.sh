@@ -1,7 +1,9 @@
-# 等待1秒, 避免curl下载脚本的打印与脚本本身的显示冲突, 吃掉了提示用户按回车继续的信息
+#!/usr/bin/env bash
+
 sleep 1
 
 echo -e "                     _ ___                   \n ___ ___ __ __ ___ _| |  _|___ __ __   _ ___ \n|-_ |_  |  |  |-_ | _ |   |- _|  |  |_| |_  |\n|___|___|  _  |___|___|_|_|___|  _  |___|___|\n        |_____|               |_____|        "
+
 red='\e[91m'
 green='\e[92m'
 yellow='\e[93m'
@@ -9,20 +11,23 @@ magenta='\e[95m'
 cyan='\e[96m'
 none='\e[0m'
 
+CONFIG_FILE="${XRAY_CONFIG_FILE:-/usr/local/etc/xray/config.json}"
+URL_FILE="${VLESS_URL_FILE:-${HOME}/_vless_reality_url_}"
+
 error() {
-    echo -e "\n$red 输入错误! $none\n"
+  echo -e "\n${red}输入错误!${none}\n"
 }
 
 warn() {
-    echo -e "\n$yellow $1 $none\n"
+  echo -e "\n${yellow}$1${none}\n"
+}
+
+info() {
+  echo -e "${yellow}$1${none}"
 }
 
 is_valid_uuid() {
-  [[ "$1" =~ ^[a-z0-9]{8}-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{12}$ ]]
-}
-
-json_escape() {
-  echo -n "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+  [[ "$1" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
 }
 
 is_valid_port() {
@@ -36,54 +41,634 @@ is_valid_port() {
   esac
 }
 
+normalize_uuid() {
+  echo -n "$1" | tr 'A-Z' 'a-z' | tr -d '[:space:]'
+}
+
+random_uuid() {
+  cat /proc/sys/kernel/random/uuid
+}
+
+parse_x25519_private_key() {
+  awk -F': ' '/^(PrivateKey|Private key):/ {print $2; exit}'
+}
+
+parse_x25519_public_key() {
+  awk -F': ' '/^(Password \(PublicKey\)|PublicKey|Public key):/ {print $2; exit}'
+}
+
+ensure_x25519_keys_parsed() {
+  if [[ -n "$1" && -n "$2" ]]; then
+    return 0
+  fi
+
+  warn "无法解析 xray x25519 输出, 请检查 Xray 版本输出格式"
+  echo "$3"
+  return 1
+}
+
+read_with_default() {
+  local prompt="$1"
+  local default_value="$2"
+  local value
+
+  if [[ -n "${default_value}" ]]; then
+    read -r -p "$(echo -e "${prompt} (默认 ${cyan}${default_value}${none}): ")" value
+    echo "${value:-${default_value}}"
+  else
+    read -r -p "${prompt}: " value
+    echo "${value}"
+  fi
+}
+
+read_required() {
+  local prompt="$1"
+  local default_value="$2"
+  local value
+
+  while :; do
+    value=$(read_with_default "${prompt}" "${default_value}")
+    value=$(echo -n "${value}" | tr -d '[:space:]')
+    if [[ -n "${value}" ]]; then
+      echo "${value}"
+      return 0
+    fi
+    error
+  done
+}
+
+read_nonempty_value() {
+  local prompt="$1"
+  local default_value="$2"
+  local value
+
+  while :; do
+    value=$(read_with_default "${prompt}" "${default_value}")
+    if [[ -n "${value}" ]]; then
+      echo "${value}"
+      return 0
+    fi
+    error
+  done
+}
+
+read_choice() {
+  local prompt="$1"
+  local default_value="$2"
+  local min_value="$3"
+  local max_value="$4"
+  local value
+
+  while :; do
+    value=$(read_with_default "${prompt} [${min_value}-${max_value}]" "${default_value}")
+    if [[ "${value}" =~ ^[0-9]+$ && "${value}" -ge "${min_value}" && "${value}" -le "${max_value}" ]]; then
+      echo "${value}"
+      return 0
+    fi
+    error
+  done
+}
+
+read_count() {
+  local prompt="$1"
+  local default_value="$2"
+  local min_value="$3"
+  local value
+
+  while :; do
+    value=$(read_with_default "${prompt}" "${default_value}")
+    if [[ "${value}" =~ ^[0-9]+$ && "${value}" -ge "${min_value}" ]]; then
+      echo "${value}"
+      return 0
+    fi
+    error
+  done
+}
+
+read_port() {
+  local prompt="$1"
+  local default_value="$2"
+  local value
+
+  while :; do
+    value=$(read_with_default "${prompt} [1-65535]" "${default_value}")
+    if is_valid_port "${value}"; then
+      echo "${value}"
+      return 0
+    fi
+    error
+  done
+}
+
+read_uuid() {
+  local prompt="$1"
+  local default_value="$2"
+  local value
+
+  while :; do
+    value=$(read_with_default "${prompt}" "${default_value}")
+    value=$(normalize_uuid "${value}")
+    if is_valid_uuid "${value}"; then
+      echo "${value}"
+      return 0
+    fi
+    error
+  done
+}
+
+read_short_id() {
+  local default_value="$1"
+  local value
+
+  while :; do
+    value=$(read_with_default "请输入 Reality ShortId, 可为空, 偶数长度十六进制, 最长16位" "${default_value}")
+    value=$(echo -n "${value}" | tr 'A-F' 'a-f' | tr -d '[:space:]')
+    if [[ "${#value}" -le 16 && $(( ${#value} % 2 )) -eq 0 && "${value}" =~ ^[0-9a-f]*$ ]]; then
+      echo "${value}"
+      return 0
+    fi
+    error
+  done
+}
+
+uuid_exists_in_list() {
+  local needle="$1"
+  shift
+  local existing
+
+  for existing in "$@"; do
+    if [[ "${existing}" == "${needle}" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+require_command() {
+  local command_name="$1"
+  local hint="$2"
+
+  if command -v "${command_name}" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  warn "未检测到 ${command_name}. ${hint}"
+  return 1
+}
+
+strip_json_comments() {
+  local src_config="$1"
+  local tmp_config
+  tmp_config=$(mktemp)
+  sed -E 's@[[:space:]]+//.*$@@; /^[[:space:]]*\/\//d' "${src_config}" > "${tmp_config}"
+  echo "${tmp_config}"
+}
+
+load_config_for_jq() {
+  if [[ ! -f "${CONFIG_FILE}" ]]; then
+    return 1
+  fi
+  strip_json_comments "${CONFIG_FILE}"
+}
+
+make_config_tmp() {
+  local config_dir
+  local config_base
+
+  config_dir=$(dirname "${CONFIG_FILE}")
+  config_base=$(basename "${CONFIG_FILE}")
+  mkdir -p "${config_dir}"
+  mktemp "${config_dir}/.${config_base}.tmp.XXXXXX"
+}
+
+prepare_xray_log_files() {
+  mkdir -p /var/log/xray
+  touch /var/log/xray/access.log /var/log/xray/error.log
+  if id nobody >/dev/null 2>&1; then
+    chown nobody:nogroup /var/log/xray/access.log /var/log/xray/error.log 2>/dev/null || true
+  fi
+  chmod 600 /var/log/xray/access.log /var/log/xray/error.log 2>/dev/null || true
+}
+
+replace_xray_config() {
+  local new_config_file="$1"
+  local validation_output
+
+  prepare_xray_log_files
+  validation_output=$(xray run -test -format json -config "${new_config_file}" 2>&1)
+  if [[ $? -ne 0 ]]; then
+    warn "新配置未通过 Xray 校验, 已取消写入"
+    echo "${validation_output}"
+    rm -f "${new_config_file}"
+    return 1
+  fi
+
+  if [[ -f "${CONFIG_FILE}" ]]; then
+    chmod --reference="${CONFIG_FILE}" "${new_config_file}" 2>/dev/null || chmod 0644 "${new_config_file}"
+    chown --reference="${CONFIG_FILE}" "${new_config_file}" 2>/dev/null || true
+  else
+    chmod 0644 "${new_config_file}"
+  fi
+
+  mv "${new_config_file}" "${CONFIG_FILE}"
+}
+
 restart_xray_service() {
   echo
-  echo -e "$yellow重启 Xray$none"
+  info "重启 Xray"
   echo "----------------------------------------------------------------"
   service xray restart
 }
 
-install_warp_by_stack() {
-  if [[ "$1" == "4" ]]; then
-    echo
-    echo -e "$yellow安装 WARP IPv4 出站$none"
-    echo "----------------------------------------------------------------"
-    curl -LO https://gitlab.com/fscarmen/warp/-/raw/main/menu.sh
-    yes "" | bash menu.sh 4
-  elif [[ "$1" == "6" ]]; then
-    echo
-    echo -e "$yellow安装 WARP IPv6 出站$none"
-    echo "----------------------------------------------------------------"
-    curl -LO https://gitlab.com/fscarmen/warp/-/raw/main/menu.sh
-    yes "" | bash menu.sh 6
+detect_public_address() {
+  local ip
+
+  if command -v curl >/dev/null 2>&1; then
+    ip=$(curl -4s -m 2 https://www.cloudflare.com/cdn-cgi/trace | awk -F= '/^ip=/{print $2; exit}')
+    if [[ -n "${ip}" ]]; then
+      echo "${ip}"
+      return 0
+    fi
+
+    ip=$(curl -6s -m 2 https://www.cloudflare.com/cdn-cgi/trace | awk -F= '/^ip=/{print $2; exit}')
+    if [[ -n "${ip}" ]]; then
+      echo "${ip}"
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+extract_saved_address() {
+  if [[ ! -f "${URL_FILE}" ]]; then
+    return 1
+  fi
+
+  sed -n 's#.*vless://[^@]*@\(\[[^]]*\]\|[^:?]*\):[0-9][0-9]*?.*#\1#p' "${URL_FILE}" | head -n 1
+}
+
+normalize_url_address() {
+  local address="$1"
+
+  address=$(echo -n "${address}" | tr -d '[:space:]')
+  if [[ "${address}" == \[*\] ]]; then
+    echo "${address}"
+  elif [[ "${address}" == *:* ]]; then
+    echo "[${address}]"
+  else
+    echo "${address}"
   fi
 }
 
-build_jq_readable_config() {
-  src_config="$1"
-  tmp_config=$(mktemp)
-  # jq 不支持 // 注释, 这里在读取前去掉整行注释与行尾注释
-  sed -E 's@[[:space:]]+//.*$@@; /^[[:space:]]*//.*/d' "${src_config}" > "${tmp_config}"
-  echo "${tmp_config}"
+current_config_value() {
+  local filter="$1"
+  local default_value="$2"
+  local jq_config_file
+  local value
+
+  jq_config_file=$(load_config_for_jq) || {
+    echo "${default_value}"
+    return 0
+  }
+
+  value=$(jq -r "${filter} // empty" "${jq_config_file}" 2>/dev/null)
+  rm -f "${jq_config_file}"
+
+  if [[ -n "${value}" && "${value}" != "null" ]]; then
+    echo "${value}"
+  else
+    echo "${default_value}"
+  fi
+}
+
+derive_x25519_keys() {
+  local private_key_seed="$1"
+  xray x25519 -i "${private_key_seed}"
+}
+
+default_private_key_for_uuid() {
+  local uuid="$1"
+  local seed
+  local key_output
+
+  seed=$(echo -n "${uuid}" | md5sum | head -c 32 | base64 -w 0 | tr '+/' '-_' | tr -d '=')
+  key_output=$(derive_x25519_keys "${seed}")
+  printf '%s\n' "${key_output}" | parse_x25519_private_key
+}
+
+public_key_for_private_key() {
+  local private_key="$1"
+  local key_output
+  local parsed_private_key
+  local public_key
+
+  key_output=$(derive_x25519_keys "${private_key}")
+  parsed_private_key=$(printf '%s\n' "${key_output}" | parse_x25519_private_key)
+  public_key=$(printf '%s\n' "${key_output}" | parse_x25519_public_key)
+  ensure_x25519_keys_parsed "${parsed_private_key}" "${public_key}" "${key_output}" || return 1
+  echo "${public_key}"
+}
+
+read_private_key() {
+  local default_private_key="$1"
+  local private_key
+  local key_output
+  local parsed_private_key
+  local public_key
+
+  while :; do
+    private_key=$(read_with_default "请输入 Reality PrivateKey" "${default_private_key}")
+    private_key=$(echo -n "${private_key}" | tr -d '[:space:]')
+
+    key_output=$(derive_x25519_keys "${private_key}")
+    parsed_private_key=$(printf '%s\n' "${key_output}" | parse_x25519_private_key)
+    public_key=$(printf '%s\n' "${key_output}" | parse_x25519_public_key)
+    if ensure_x25519_keys_parsed "${parsed_private_key}" "${public_key}" "${key_output}"; then
+      PRIVATE_KEY_RESULT="${parsed_private_key}"
+      PUBLIC_KEY_RESULT="${public_key}"
+      return 0
+    fi
+  done
+}
+
+append_json_item() {
+  local array_json="$1"
+  local item_json="$2"
+
+  jq -c --argjson item "${item_json}" '. + [$item]' <<< "${array_json}"
+}
+
+landing_tag_for_uuid() {
+  echo "landing-$1"
+}
+
+node_email_for_uuid() {
+  echo "node-$1"
+}
+
+build_socks_outbound_json() {
+  local tag="$1"
+  local address="$2"
+  local port="$3"
+  local user="$4"
+  local pass="$5"
+
+  if [[ -n "${user}" ]]; then
+    jq -n -c \
+      --arg tag "${tag}" \
+      --arg address "${address}" \
+      --argjson port "${port}" \
+      --arg user "${user}" \
+      --arg pass "${pass}" \
+      '{protocol:"socks",settings:{servers:[{address:$address,port:$port,users:[{user:$user,pass:$pass}]}]},tag:$tag}'
+  else
+    jq -n -c \
+      --arg tag "${tag}" \
+      --arg address "${address}" \
+      --argjson port "${port}" \
+      '{protocol:"socks",settings:{servers:[{address:$address,port:$port}]},tag:$tag}'
+  fi
+}
+
+build_shadowsocks_outbound_json() {
+  local tag="$1"
+  local address="$2"
+  local port="$3"
+  local method="$4"
+  local password="$5"
+
+  jq -n -c \
+    --arg tag "${tag}" \
+    --arg address "${address}" \
+    --argjson port "${port}" \
+    --arg method "${method}" \
+    --arg password "${password}" \
+    '{protocol:"shadowsocks",settings:{servers:[{address:$address,port:$port,method:$method,password:$password}]},tag:$tag}'
+}
+
+build_landing_outbound_json() {
+  local outbound_type="$1"
+  local tag="$2"
+  local address="$3"
+  local port="$4"
+  local user="$5"
+  local pass="$6"
+  local method="$7"
+
+  if [[ "${outbound_type}" == "socks5" ]]; then
+    build_socks_outbound_json "${tag}" "${address}" "${port}" "${user}" "${pass}"
+  else
+    build_shadowsocks_outbound_json "${tag}" "${address}" "${port}" "${method}" "${pass}"
+  fi
+}
+
+read_landing_outbound() {
+  local default_type="$1"
+  local default_address="$2"
+  local default_port="$3"
+  local default_user="$4"
+  local default_pass="$5"
+  local default_method="$6"
+  local choice
+  local address
+  local port
+  local user
+  local pass
+  local method
+
+  echo -e "${cyan}1${none}. socks5"
+  echo -e "${cyan}2${none}. shadowsocks"
+  if [[ "${default_type}" == "shadowsocks" ]]; then
+    choice=$(read_choice "请选择落地类型" "2" 1 2)
+  else
+    choice=$(read_choice "请选择落地类型" "1" 1 2)
+  fi
+
+  address=$(read_required "请输入落地地址" "${default_address}")
+  port=$(read_port "请输入落地端口" "${default_port:-443}")
+
+  if [[ "${choice}" == "1" ]]; then
+    while :; do
+      user=$(read_with_default "请输入 Socks5 用户名, 可留空" "${default_user}")
+      pass=$(read_with_default "请输入 Socks5 密码, 可留空" "${default_pass}")
+      if [[ -z "${user}" && -z "${pass}" ]]; then
+        LANDING_TYPE_RESULT="socks5"
+        LANDING_ADDRESS_RESULT="${address}"
+        LANDING_PORT_RESULT="${port}"
+        LANDING_USER_RESULT=""
+        LANDING_PASS_RESULT=""
+        LANDING_METHOD_RESULT=""
+        return 0
+      fi
+      if [[ -n "${user}" && -n "${pass}" ]]; then
+        LANDING_TYPE_RESULT="socks5"
+        LANDING_ADDRESS_RESULT="${address}"
+        LANDING_PORT_RESULT="${port}"
+        LANDING_USER_RESULT="${user}"
+        LANDING_PASS_RESULT="${pass}"
+        LANDING_METHOD_RESULT=""
+        return 0
+      fi
+      warn "Socks5 用户名和密码需要同时填写或同时留空"
+    done
+  fi
+
+  method=$(read_required "请输入 Shadowsocks 加密方式" "${default_method:-aes-128-gcm}")
+  pass=$(read_nonempty_value "请输入 Shadowsocks 密码" "${default_pass}")
+  LANDING_TYPE_RESULT="shadowsocks"
+  LANDING_ADDRESS_RESULT="${address}"
+  LANDING_PORT_RESULT="${port}"
+  LANDING_USER_RESULT=""
+  LANDING_PASS_RESULT="${pass}"
+  LANDING_METHOD_RESULT="${method}"
+}
+
+build_config_file() {
+  local output_file="$1"
+  local port="$2"
+  local domain="$3"
+  local private_key="$4"
+  local short_id="$5"
+  local clients_json="$6"
+  local landing_outbounds_json="$7"
+  local routing_rules_json="$8"
+  local outbounds_json
+  local rules_json
+  local item
+
+  outbounds_json='[]'
+  item=$(jq -n -c '{protocol:"freedom",tag:"direct"}')
+  outbounds_json=$(append_json_item "${outbounds_json}" "${item}")
+
+  while IFS= read -r item; do
+    [[ -z "${item}" ]] && continue
+    outbounds_json=$(append_json_item "${outbounds_json}" "${item}")
+  done <<< "${landing_outbounds_json}"
+
+  item=$(jq -n -c '{protocol:"blackhole",tag:"block"}')
+  outbounds_json=$(append_json_item "${outbounds_json}" "${item}")
+
+  rules_json="${routing_rules_json}"
+  item=$(jq -n -c '{type:"field",ip:["geoip:private"],outboundTag:"block"}')
+  rules_json=$(append_json_item "${rules_json}" "${item}")
+
+  jq -n \
+    --argjson port "${port}" \
+    --arg domain "${domain}" \
+    --arg privateKey "${private_key}" \
+    --arg shortId "${short_id}" \
+    --argjson clients "${clients_json}" \
+    --argjson outbounds "${outbounds_json}" \
+    --argjson rules "${rules_json}" \
+    '{
+      log: {
+        access: "/var/log/xray/access.log",
+        error: "/var/log/xray/error.log",
+        loglevel: "warning"
+      },
+      inbounds: [
+        {
+          listen: "0.0.0.0",
+          port: $port,
+          protocol: "vless",
+          settings: {
+            clients: $clients,
+            decryption: "none"
+          },
+          streamSettings: {
+            network: "tcp",
+            security: "reality",
+            realitySettings: {
+              show: false,
+              dest: ($domain + ":443"),
+              xver: 0,
+              serverNames: [$domain],
+              privateKey: $privateKey,
+              shortIds: [$shortId]
+            }
+          },
+          sniffing: {
+            enabled: true,
+            destOverride: ["http", "tls", "quic"]
+          }
+        }
+      ],
+      outbounds: $outbounds,
+      dns: {
+        servers: [
+          "8.8.8.8",
+          "1.1.1.1",
+          "2001:4860:4860::8888",
+          "2606:4700:4700::1111",
+          "localhost"
+        ]
+      },
+      routing: {
+        domainStrategy: "IPIfNonMatch",
+        rules: $rules
+      }
+    }' > "${output_file}"
+}
+
+node_outbound_tag() {
+  local jq_config_file="$1"
+  local node_idx="$2"
+  local node_email
+  local tag
+
+  node_email=$(jq -r ".inbounds[0].settings.clients[${node_idx}].email // \"\"" "${jq_config_file}")
+  if [[ -z "${node_email}" ]]; then
+    echo "direct"
+    return 0
+  fi
+
+  tag=$(jq -r --arg email "${node_email}" 'first(.routing.rules[]? | select(((.user // []) | index($email)) != null) | .outboundTag) // "direct"' "${jq_config_file}")
+  echo "${tag}"
+}
+
+describe_outbound() {
+  local jq_config_file="$1"
+  local tag="$2"
+  local protocol
+  local address
+  local port
+  local method
+
+  if [[ -z "${tag}" || "${tag}" == "direct" ]]; then
+    echo "direct"
+    return 0
+  fi
+
+  protocol=$(jq -r --arg tag "${tag}" 'first(.outbounds[]? | select((.tag // "") == $tag) | .protocol) // empty' "${jq_config_file}")
+  address=$(jq -r --arg tag "${tag}" 'first(.outbounds[]? | select((.tag // "") == $tag) | .settings.servers[0].address) // empty' "${jq_config_file}")
+  port=$(jq -r --arg tag "${tag}" 'first(.outbounds[]? | select((.tag // "") == $tag) | .settings.servers[0].port) // empty' "${jq_config_file}")
+
+  if [[ "${protocol}" == "socks" ]]; then
+    echo "socks5 ${address}:${port}"
+  elif [[ "${protocol}" == "shadowsocks" ]]; then
+    method=$(jq -r --arg tag "${tag}" 'first(.outbounds[]? | select((.tag // "") == $tag) | .settings.servers[0].method) // empty' "${jq_config_file}")
+    echo "shadowsocks ${address}:${port} ${method}"
+  else
+    echo "${tag}"
+  fi
 }
 
 list_nodes_overview() {
-  config_file="/usr/local/etc/xray/config.json"
-  if [[ ! -f "${config_file}" ]]; then
-    warn "未找到 ${config_file}"
-    return 1
-  fi
+  local jq_config_file
+  local node_count
+  local idx
+  local node_uuid
+  local tag
+  local outbound_desc
 
-  jq_config_file=$(build_jq_readable_config "${config_file}")
+  jq_config_file=$(load_config_for_jq) || {
+    warn "未找到 ${CONFIG_FILE}, 请先安装节点"
+    return 1
+  }
 
   node_count=$(jq '.inbounds[0].settings.clients | length' "${jq_config_file}" 2>/dev/null)
-  if [[ -z "${node_count}" || "${node_count}" == "null" || ! "${node_count}" =~ ^[0-9]+$ ]]; then
-    rm -f "${jq_config_file}"
-    warn "当前没有可管理的节点"
-    return 1
-  fi
-
-  if [[ ${node_count} -eq 0 ]]; then
+  if [[ -z "${node_count}" || "${node_count}" == "null" || ! "${node_count}" =~ ^[0-9]+$ || "${node_count}" -eq 0 ]]; then
     rm -f "${jq_config_file}"
     warn "当前没有可管理的节点"
     return 1
@@ -91,172 +676,471 @@ list_nodes_overview() {
 
   echo
   echo "---------- 当前节点列表 ----------"
-  for ((i=0; i<node_count; i++)); do
-    idx=$((i + 1))
-    node_uuid=$(jq -r ".inbounds[0].settings.clients[${i}].id // \"\"" "${jq_config_file}")
-    node_email=$(jq -r ".inbounds[0].settings.clients[${i}].email // \"\"" "${jq_config_file}")
-
-    node_outbound="direct"
-    if [[ -n "${node_email}" ]]; then
-      node_outbound=$(jq -r --arg email "${node_email}" '.routing.rules[]? | select(((.user // []) | index($email)) != null) | .outboundTag' "${jq_config_file}" | head -n 1)
-      [[ -z "${node_outbound}" ]] && node_outbound="direct"
-    fi
-
-    if [[ ${i} -eq 0 ]]; then
-      node_title="主节点"
-    else
-      node_title="额外节点${i}"
-    fi
-
-    echo -e "$yellow ${idx}. ${node_title}${none} UUID=${cyan}${node_uuid}${none} Outbound=${magenta}${node_outbound}${none}"
+  for ((idx=0; idx<node_count; idx++)); do
+    node_uuid=$(jq -r ".inbounds[0].settings.clients[${idx}].id // \"\"" "${jq_config_file}")
+    tag=$(node_outbound_tag "${jq_config_file}" "${idx}")
+    outbound_desc=$(describe_outbound "${jq_config_file}" "${tag}")
+    echo -e "${yellow}$((idx + 1)). 节点$((idx + 1))${none} UUID=${cyan}${node_uuid}${none} Outbound=${magenta}${outbound_desc}${none}"
   done
   echo "----------------------------------"
+
   rm -f "${jq_config_file}"
+  print_vless_urls "" || true
+}
+
+refresh_vless_url_file() {
+  local address="$1"
+  local jq_config_file
+  local node_count
+  local port
+  local domain
+  local private_key
+  local short_id
+  local public_key
+  local idx
+  local current_uuid
+  local tag
+  local outbound_desc
+  local current_url
+  local tmp_url_file
+
+  jq_config_file=$(load_config_for_jq) || {
+    warn "未找到 ${CONFIG_FILE}, 跳过刷新节点链接"
+    return 1
+  }
+
+  node_count=$(jq '.inbounds[0].settings.clients | length' "${jq_config_file}" 2>/dev/null)
+  if [[ -z "${node_count}" || "${node_count}" == "null" || ! "${node_count}" =~ ^[0-9]+$ || "${node_count}" -eq 0 ]]; then
+    : > "${URL_FILE}"
+    rm -f "${jq_config_file}"
+    info "当前没有节点, 已清空 ${URL_FILE}"
+    return 0
+  fi
+
+  if [[ -z "${address}" ]]; then
+    address=$(extract_saved_address)
+  fi
+  if [[ -z "${address}" ]]; then
+    address=$(detect_public_address)
+  fi
+  if [[ -z "${address}" ]]; then
+    rm -f "${jq_config_file}"
+    warn "无法确定客户端连接地址, 跳过刷新 ${URL_FILE}"
+    return 1
+  fi
+  address=$(normalize_url_address "${address}")
+
+  port=$(jq -r '.inbounds[0].port // empty' "${jq_config_file}")
+  domain=$(jq -r '.inbounds[0].streamSettings.realitySettings.serverNames[0] // ((.inbounds[0].streamSettings.realitySettings.dest // "") | sub(":[0-9]+$"; "")) // empty' "${jq_config_file}")
+  private_key=$(jq -r '.inbounds[0].streamSettings.realitySettings.privateKey // empty' "${jq_config_file}")
+  short_id=$(jq -r '.inbounds[0].streamSettings.realitySettings.shortIds[0] // empty' "${jq_config_file}")
+  public_key=$(public_key_for_private_key "${private_key}") || {
+    rm -f "${jq_config_file}"
+    return 1
+  }
+
+  tmp_url_file=$(mktemp)
+  : > "${tmp_url_file}"
+
+  for ((idx=0; idx<node_count; idx++)); do
+    current_uuid=$(jq -r ".inbounds[0].settings.clients[${idx}].id // \"\"" "${jq_config_file}")
+    [[ -z "${current_uuid}" ]] && continue
+
+    tag=$(node_outbound_tag "${jq_config_file}" "${idx}")
+    outbound_desc=$(describe_outbound "${jq_config_file}" "${tag}")
+    current_url="vless://${current_uuid}@${address}:${port}?flow=xtls-rprx-vision&encryption=none&type=tcp&security=reality&sni=${domain}&fp=random&pbk=${public_key}&sid=${short_id}&spx=#NODE_$((idx + 1))_${address}"
+    echo "节点$((idx + 1)) (${outbound_desc}):" >> "${tmp_url_file}"
+    echo "${current_url}" >> "${tmp_url_file}"
+    echo >> "${tmp_url_file}"
+  done
+
+  mv "${tmp_url_file}" "${URL_FILE}"
+  rm -f "${jq_config_file}"
+}
+
+print_vless_urls() {
+  local address="$1"
+
+  if refresh_vless_url_file "${address}"; then
+    echo
+    echo "---------- VLESS 节点链接 ----------"
+    cat "${URL_FILE}"
+  fi
+}
+
+collect_node_uuid() {
+  local prompt="$1"
+  local default_uuid="$2"
+  local uuid
+
+  while :; do
+    uuid=$(read_uuid "${prompt}" "${default_uuid}")
+    if uuid_exists_in_list "${uuid}" "${NODE_UUIDS[@]}"; then
+      warn "UUID 已存在, 请换一个"
+      continue
+    fi
+    echo "${uuid}"
+    return 0
+  done
+}
+
+install_nodes() {
+  local mode
+  local default_address
+  local address
+  local port
+  local domain
+  local direct_count
+  local landing_count
+  local total_count
+  local idx
+  local uuid
+  local email
+  local tag
+  local outbound_json
+  local client_json
+  local rule_json
+  local clients_json='[]'
+  local landing_outbounds_text=""
+  local routing_rules_json='[]'
+  local default_private_key
+  local private_key
+  local public_key
+  local short_id
+  local tmp_config
+
+  require_command xray "请先使用主菜单 3 安装/更新 Xray; 安装节点流程不会自动安装 Xray。" || return 1
+  require_command jq "请先安装 jq: apt install -y jq" || return 1
+
+  echo
+  info "安装节点"
+  echo -e "${cyan}1${none}. 仅直连"
+  echo -e "${cyan}2${none}. 直连加落地"
+  mode=$(read_choice "请选择安装模式" "1" 1 2)
+
+  default_address=$(extract_saved_address)
+  [[ -z "${default_address}" ]] && default_address=$(detect_public_address)
+  address=$(read_required "请输入客户端连接地址(IP或域名)" "${default_address}")
+  address=$(normalize_url_address "${address}")
+
+  port=$(read_port "请输入 Xray 入站端口" "$(current_config_value '.inbounds[0].port' '443')")
+  domain=$(read_required "请输入 Reality SNI 域名" "$(current_config_value '.inbounds[0].streamSettings.realitySettings.serverNames[0]' 'learn.microsoft.com')")
+
+  direct_count=$(read_count "请输入直连节点数量" "1" 1)
+  if [[ "${mode}" == "2" ]]; then
+    landing_count=$(read_count "请输入落地节点数量" "1" 1)
+  else
+    landing_count=0
+  fi
+  total_count=$((direct_count + landing_count))
+
+  NODE_UUIDS=()
+  for ((idx=1; idx<=direct_count; idx++)); do
+    uuid=$(collect_node_uuid "请输入节点${idx} UUID" "$(random_uuid)")
+    NODE_UUIDS+=("${uuid}")
+    client_json=$(jq -n -c --arg id "${uuid}" '{id:$id,flow:"xtls-rprx-vision"}')
+    clients_json=$(append_json_item "${clients_json}" "${client_json}")
+  done
+
+  for ((idx=direct_count + 1; idx<=total_count; idx++)); do
+    uuid=$(collect_node_uuid "请输入节点${idx} UUID" "$(random_uuid)")
+    NODE_UUIDS+=("${uuid}")
+    email=$(node_email_for_uuid "${uuid}")
+    tag=$(landing_tag_for_uuid "${uuid}")
+
+    echo
+    info "配置节点${idx}的落地出站"
+    read_landing_outbound "socks5" "" "443" "" "" "aes-128-gcm"
+    outbound_json=$(build_landing_outbound_json "${LANDING_TYPE_RESULT}" "${tag}" "${LANDING_ADDRESS_RESULT}" "${LANDING_PORT_RESULT}" "${LANDING_USER_RESULT}" "${LANDING_PASS_RESULT}" "${LANDING_METHOD_RESULT}")
+    landing_outbounds_text="${landing_outbounds_text}${outbound_json}"$'\n'
+
+    client_json=$(jq -n -c --arg id "${uuid}" --arg email "${email}" '{id:$id,flow:"xtls-rprx-vision",email:$email}')
+    clients_json=$(append_json_item "${clients_json}" "${client_json}")
+    rule_json=$(jq -n -c --arg email "${email}" --arg tag "${tag}" '{type:"field",user:[$email],outboundTag:$tag}')
+    routing_rules_json=$(append_json_item "${routing_rules_json}" "${rule_json}")
+  done
+
+  default_private_key=$(default_private_key_for_uuid "${NODE_UUIDS[0]}")
+  read_private_key "${default_private_key}" || return 1
+  private_key="${PRIVATE_KEY_RESULT}"
+  public_key="${PUBLIC_KEY_RESULT}"
+  short_id=$(read_short_id "$(echo -n "${NODE_UUIDS[0]}" | sha1sum | head -c 16)")
+
+  tmp_config=$(make_config_tmp)
+  build_config_file "${tmp_config}" "${port}" "${domain}" "${private_key}" "${short_id}" "${clients_json}" "${landing_outbounds_text}" "${routing_rules_json}"
+
+  if replace_xray_config "${tmp_config}"; then
+    refresh_vless_url_file "${address}"
+    restart_xray_service
+    echo
+    echo "---------- 节点信息 ----------"
+    echo -e "${yellow}地址${none}: ${cyan}${address}${none}"
+    echo -e "${yellow}端口${none}: ${cyan}${port}${none}"
+    echo -e "${yellow}SNI${none}: ${cyan}${domain}${none}"
+    echo -e "${yellow}PublicKey${none}: ${cyan}${public_key}${none}"
+    echo -e "${yellow}ShortId${none}: ${cyan}${short_id}${none}"
+    echo
+    echo "---------- VLESS 节点链接 ----------"
+    cat "${URL_FILE}"
+    echo "节点链接保存在 ${URL_FILE}"
+  fi
+}
+
+node_current_details() {
+  local jq_config_file="$1"
+  local idx="$2"
+  local tag="$3"
+  local protocol
+
+  CURRENT_UUID=$(jq -r ".inbounds[0].settings.clients[${idx}].id // \"\"" "${jq_config_file}")
+  CURRENT_EMAIL=$(jq -r ".inbounds[0].settings.clients[${idx}].email // \"\"" "${jq_config_file}")
+  CURRENT_TAG="${tag}"
+  CURRENT_OUTBOUND_TYPE="direct"
+  CURRENT_ADDRESS=""
+  CURRENT_PORT=""
+  CURRENT_USER=""
+  CURRENT_PASS=""
+  CURRENT_METHOD=""
+
+  [[ "${tag}" == "direct" ]] && return 0
+
+  protocol=$(jq -r --arg tag "${tag}" 'first(.outbounds[]? | select((.tag // "") == $tag) | .protocol) // empty' "${jq_config_file}")
+  CURRENT_ADDRESS=$(jq -r --arg tag "${tag}" 'first(.outbounds[]? | select((.tag // "") == $tag) | .settings.servers[0].address) // empty' "${jq_config_file}")
+  CURRENT_PORT=$(jq -r --arg tag "${tag}" 'first(.outbounds[]? | select((.tag // "") == $tag) | .settings.servers[0].port) // empty' "${jq_config_file}")
+
+  if [[ "${protocol}" == "socks" ]]; then
+    CURRENT_OUTBOUND_TYPE="socks5"
+    CURRENT_USER=$(jq -r --arg tag "${tag}" 'first(.outbounds[]? | select((.tag // "") == $tag) | .settings.servers[0].users[0].user) // empty' "${jq_config_file}")
+    CURRENT_PASS=$(jq -r --arg tag "${tag}" 'first(.outbounds[]? | select((.tag // "") == $tag) | .settings.servers[0].users[0].pass) // empty' "${jq_config_file}")
+  elif [[ "${protocol}" == "shadowsocks" ]]; then
+    CURRENT_OUTBOUND_TYPE="shadowsocks"
+    CURRENT_METHOD=$(jq -r --arg tag "${tag}" 'first(.outbounds[]? | select((.tag // "") == $tag) | .settings.servers[0].method) // empty' "${jq_config_file}")
+    CURRENT_PASS=$(jq -r --arg tag "${tag}" 'first(.outbounds[]? | select((.tag // "") == $tag) | .settings.servers[0].password) // empty' "${jq_config_file}")
+  fi
+}
+
+update_node_by_index() {
+  local idx_1based="$1"
+  local jq_config_file
+  local node_count
+  local idx
+  local tag
+  local new_uuid
+  local duplicate_count
+  local outbound_choice
+  local new_type
+  local new_email=""
+  local new_tag=""
+  local new_outbound_json='{}'
+  local tmp_config
+
+  jq_config_file=$(load_config_for_jq) || {
+    warn "未找到 ${CONFIG_FILE}"
+    return 1
+  }
+
+  node_count=$(jq '.inbounds[0].settings.clients | length' "${jq_config_file}" 2>/dev/null)
+  if [[ -z "${node_count}" || ! "${node_count}" =~ ^[0-9]+$ || "${idx_1based}" -lt 1 || "${idx_1based}" -gt "${node_count}" ]]; then
+    rm -f "${jq_config_file}"
+    error
+    return 1
+  fi
+
+  idx=$((idx_1based - 1))
+  tag=$(node_outbound_tag "${jq_config_file}" "${idx}")
+  node_current_details "${jq_config_file}" "${idx}" "${tag}"
+
+  echo
+  info "修改节点${idx_1based}; 每项直接回车表示保留当前值"
+  new_uuid=$(read_uuid "UUID" "${CURRENT_UUID}")
+  duplicate_count=$(jq --argjson idx "${idx}" --arg uuid "${new_uuid}" '[.inbounds[0].settings.clients | to_entries[] | select(.key != $idx and .value.id == $uuid)] | length' "${jq_config_file}" 2>/dev/null)
+  if [[ "${duplicate_count}" -gt 0 ]]; then
+    rm -f "${jq_config_file}"
+    warn "UUID已存在, 不允许生成重复节点"
+    return 1
+  fi
+
+  echo -e "${cyan}1${none}. direct"
+  echo -e "${cyan}2${none}. socks5"
+  echo -e "${cyan}3${none}. shadowsocks"
+  if [[ "${CURRENT_OUTBOUND_TYPE}" == "socks5" ]]; then
+    outbound_choice=$(read_choice "请选择出站类型" "2" 1 3)
+  elif [[ "${CURRENT_OUTBOUND_TYPE}" == "shadowsocks" ]]; then
+    outbound_choice=$(read_choice "请选择出站类型" "3" 1 3)
+  else
+    outbound_choice=$(read_choice "请选择出站类型" "1" 1 3)
+  fi
+
+  case "${outbound_choice}" in
+  1)
+    new_type="direct"
+    ;;
+  2)
+    new_type="socks5"
+    read_landing_outbound "socks5" "${CURRENT_ADDRESS}" "${CURRENT_PORT:-443}" "${CURRENT_USER}" "${CURRENT_PASS}" "aes-128-gcm"
+    ;;
+  3)
+    new_type="shadowsocks"
+    read_landing_outbound "shadowsocks" "${CURRENT_ADDRESS}" "${CURRENT_PORT:-443}" "" "${CURRENT_PASS}" "${CURRENT_METHOD:-aes-128-gcm}"
+    ;;
+  esac
+
+  if [[ "${new_type}" != "direct" ]]; then
+    if [[ -n "${CURRENT_EMAIL}" && "${CURRENT_TAG}" != "direct" ]]; then
+      new_email="${CURRENT_EMAIL}"
+      new_tag="${CURRENT_TAG}"
+    else
+      new_email=$(node_email_for_uuid "${new_uuid}")
+      new_tag=$(landing_tag_for_uuid "${new_uuid}")
+    fi
+    new_outbound_json=$(build_landing_outbound_json "${LANDING_TYPE_RESULT}" "${new_tag}" "${LANDING_ADDRESS_RESULT}" "${LANDING_PORT_RESULT}" "${LANDING_USER_RESULT}" "${LANDING_PASS_RESULT}" "${LANDING_METHOD_RESULT}")
+  fi
+
+  tmp_config=$(make_config_tmp)
+  if [[ "${new_type}" == "direct" ]]; then
+    jq \
+      --argjson idx "${idx}" \
+      --arg uuid "${new_uuid}" \
+      --arg old_email "${CURRENT_EMAIL}" \
+      --arg old_tag "${CURRENT_TAG}" '
+        (.routing.rules //= [])
+        | (.outbounds //= [])
+        | if $old_email != "" then
+            .routing.rules |= map(select(((.user // []) | index($old_email)) == null))
+          else
+            .
+          end
+        | .inbounds[0].settings.clients[$idx] = {id:$uuid,flow:"xtls-rprx-vision"}
+        | if ($old_tag | test("^landing-")) and (([.routing.rules[]? | select(.outboundTag == $old_tag)] | length) == 0) then
+            .outbounds |= map(select((.tag // "") != $old_tag))
+          else
+            .
+          end
+      ' "${jq_config_file}" > "${tmp_config}"
+  else
+    jq \
+      --argjson idx "${idx}" \
+      --arg uuid "${new_uuid}" \
+      --arg old_email "${CURRENT_EMAIL}" \
+      --arg old_tag "${CURRENT_TAG}" \
+      --arg email "${new_email}" \
+      --arg tag "${new_tag}" \
+      --argjson outbound "${new_outbound_json}" '
+        (.routing.rules //= [])
+        | (.outbounds //= [])
+        | if $old_email != "" then
+            .routing.rules |= map(select(((.user // []) | index($old_email)) == null))
+          else
+            .
+          end
+        | .inbounds[0].settings.clients[$idx] = {id:$uuid,flow:"xtls-rprx-vision",email:$email}
+        | .routing.rules += [{type:"field",user:[$email],outboundTag:$tag}]
+        | .outbounds |= map(select((.tag // "") != $tag))
+        | .outbounds += [$outbound]
+        | if ($old_tag | test("^landing-")) and ($old_tag != $tag) and (([.routing.rules[]? | select(.outboundTag == $old_tag)] | length) == 0) then
+            .outbounds |= map(select((.tag // "") != $old_tag))
+          else
+            .
+          end
+      ' "${jq_config_file}" > "${tmp_config}"
+  fi
+
+  rm -f "${jq_config_file}"
+  if replace_xray_config "${tmp_config}"; then
+    refresh_vless_url_file ""
+    restart_xray_service
+    echo -e "${green}已修改节点 ${idx_1based}${none}"
+  fi
 }
 
 delete_node_by_index() {
-  delete_idx_1based="$1"
-  config_file="/usr/local/etc/xray/config.json"
+  local idx_1based="$1"
+  local jq_config_file
+  local node_count
+  local idx
+  local old_email
+  local old_tag
+  local tmp_config
 
-  if [[ -z "${delete_idx_1based}" || ! "${delete_idx_1based}" =~ ^[0-9]+$ ]]; then
-    error
+  jq_config_file=$(load_config_for_jq) || {
+    warn "未找到 ${CONFIG_FILE}"
     return 1
-  fi
-
-  delete_idx=$((delete_idx_1based - 1))
-
-  jq_config_file=$(build_jq_readable_config "${config_file}")
+  }
 
   node_count=$(jq '.inbounds[0].settings.clients | length' "${jq_config_file}" 2>/dev/null)
-  if [[ -z "${node_count}" || ! "${node_count}" =~ ^[0-9]+$ || ${delete_idx_1based} -lt 1 || ${delete_idx_1based} -gt ${node_count} ]]; then
+  if [[ -z "${node_count}" || ! "${node_count}" =~ ^[0-9]+$ || "${idx_1based}" -lt 1 || "${idx_1based}" -gt "${node_count}" ]]; then
     rm -f "${jq_config_file}"
     error
     return 1
   fi
 
-  if [[ ${delete_idx_1based} -eq 1 ]]; then
-    rm -f "${jq_config_file}"
-    warn "主节点不可删除, 只允许删除额外节点"
-    return 1
-  fi
+  idx=$((idx_1based - 1))
+  old_email=$(jq -r ".inbounds[0].settings.clients[${idx}].email // \"\"" "${jq_config_file}")
+  old_tag=$(node_outbound_tag "${jq_config_file}" "${idx}")
 
-  delete_email=$(jq -r ".inbounds[0].settings.clients[${delete_idx}].email // \"\"" "${jq_config_file}")
-  delete_outbound=""
-  if [[ -n "${delete_email}" ]]; then
-    delete_outbound=$(jq -r --arg email "${delete_email}" '.routing.rules[]? | select(((.user // []) | index($email)) != null) | .outboundTag' "${jq_config_file}" | head -n 1)
-  fi
+  tmp_config=$(make_config_tmp)
+  jq \
+    --argjson idx "${idx}" \
+    --arg old_email "${old_email}" \
+    --arg old_tag "${old_tag}" '
+      (.routing.rules //= [])
+      | (.outbounds //= [])
+      | del(.inbounds[0].settings.clients[$idx])
+      | if $old_email != "" then
+          .routing.rules |= map(select(((.user // []) | index($old_email)) == null))
+        else
+          .
+        end
+      | if ($old_tag | test("^landing-")) and (([.routing.rules[]? | select(.outboundTag == $old_tag)] | length) == 0) then
+          .outbounds |= map(select((.tag // "") != $old_tag))
+        else
+          .
+        end
+    ' "${jq_config_file}" > "${tmp_config}"
 
-  tmp_file=$(mktemp)
-  jq --argjson idx ${delete_idx} 'del(.inbounds[0].settings.clients[$idx])' "${jq_config_file}" > "${tmp_file}" && mv "${tmp_file}" "${config_file}"
   rm -f "${jq_config_file}"
-
-  if [[ -n "${delete_email}" ]]; then
-    tmp_file=$(mktemp)
-    jq --arg email "${delete_email}" 'if .routing and .routing.rules then .routing.rules |= map(select(((.user // []) | index($email)) == null)) else . end' "${config_file}" > "${tmp_file}" && mv "${tmp_file}" "${config_file}"
+  if replace_xray_config "${tmp_config}"; then
+    refresh_vless_url_file ""
+    restart_xray_service
+    echo -e "${green}已删除节点 ${idx_1based}${none}"
   fi
-
-  if [[ -n "${delete_outbound}" ]]; then
-    ref_count=$(jq --arg tag "${delete_outbound}" '[.routing.rules[]? | select(.outboundTag == $tag)] | length' "${config_file}")
-    if [[ ${ref_count} -eq 0 ]]; then
-      tmp_file=$(mktemp)
-      jq --arg tag "${delete_outbound}" 'if .outbounds then .outbounds |= map(select((.tag // "") != $tag)) else . end' "${config_file}" > "${tmp_file}" && mv "${tmp_file}" "${config_file}"
-    fi
-  fi
-
-  restart_xray_service
-  echo -e "$green 已删除节点 ${delete_idx_1based}$none"
-}
-
-modify_node_uuid_by_index() {
-  modify_idx_1based="$1"
-  new_uuid="$2"
-  config_file="/usr/local/etc/xray/config.json"
-
-  if [[ -z "${modify_idx_1based}" || ! "${modify_idx_1based}" =~ ^[0-9]+$ ]]; then
-    error
-    return 1
-  fi
-
-  modify_idx=$((modify_idx_1based - 1))
-
-  jq_config_file=$(build_jq_readable_config "${config_file}")
-
-  node_count=$(jq '.inbounds[0].settings.clients | length' "${jq_config_file}" 2>/dev/null)
-  if [[ -z "${node_count}" || ! "${node_count}" =~ ^[0-9]+$ || ${modify_idx_1based} -lt 1 || ${modify_idx_1based} -gt ${node_count} ]]; then
-    rm -f "${jq_config_file}"
-    error
-    return 1
-  fi
-
-  if ! is_valid_uuid "${new_uuid}"; then
-    rm -f "${jq_config_file}"
-    error
-    return 1
-  fi
-
-  tmp_file=$(mktemp)
-  jq --argjson idx ${modify_idx} --arg uuid "${new_uuid}" '.inbounds[0].settings.clients[$idx].id = $uuid' "${jq_config_file}" > "${tmp_file}" && mv "${tmp_file}" "${config_file}"
-  rm -f "${jq_config_file}"
-  restart_xray_service
-  echo -e "$green 已修改节点 ${modify_idx_1based} 的UUID$none"
 }
 
 node_management_menu() {
-  config_file="/usr/local/etc/xray/config.json"
-  if [[ ! -f "${config_file}" ]]; then
-    warn "未找到 ${config_file}, 请先完成一次安装配置"
-    return 1
-  fi
+  require_command jq "请先安装 jq: apt install -y jq" || return 1
 
   while :; do
     echo
-    echo -e "$yellow 节点管理菜单 $none"
-    echo -e "${cyan}1${none}. 查看节点列表"
-    echo -e "${cyan}2${none}. 删除额外节点"
-    echo -e "${cyan}3${none}. 修改节点UUID"
-    echo -e "${cyan}4${none}. 退出节点管理"
-    read -p "$(echo -e "请选择 [1-4] (默认Default ${cyan}1${none}):")" manage_action
-    [ -z "${manage_action}" ] && manage_action=1
+    info "节点管理"
+    echo -e "${cyan}1${none}. 查看节点"
+    echo -e "${cyan}2${none}. 修改节点"
+    echo -e "${cyan}3${none}. 删除节点"
+    echo -e "${cyan}4${none}. 返回"
 
-    case ${manage_action} in
+    case "$(read_choice "请选择" "1" 1 4)" in
     1)
       list_nodes_overview
       ;;
     2)
       if list_nodes_overview; then
-        read -p "请输入要删除的节点编号: " delete_idx_1based
-        delete_node_by_index "${delete_idx_1based}"
+        update_node_by_index "$(read_required "请输入要修改的节点编号" "")"
       fi
       ;;
     3)
       if list_nodes_overview; then
-        read -p "请输入要修改的节点编号: " modify_idx_1based
-        read -p "请输入新的UUID: " new_uuid
-        modify_node_uuid_by_index "${modify_idx_1based}" "${new_uuid}"
+        delete_node_by_index "$(read_required "请输入要删除的节点编号" "")"
       fi
       ;;
     4)
-      break
-      ;;
-    *)
-      error
+      return 0
       ;;
     esac
   done
 }
 
-pause() {
-    read -rsp "$(echo -e "按 $green Enter 回车键 $none 继续....或按 $red Ctrl + C $none 取消.")" -d $'\n'
-    echo
-}
-
-is_xray_installed() {
-  command -v xray >/dev/null 2>&1
-}
-
 install_base_dependencies() {
   echo
-  echo -e "$yellow安装基础依赖$none"
+  info "安装基础依赖"
   echo "----------------------------------------------------------------"
   apt update
   apt install -y curl wget sudo jq net-tools lsof
@@ -266,936 +1150,79 @@ install_or_update_xray() {
   install_base_dependencies
 
   echo
-  echo -e "${yellow}安装/更新 Xray$none"
+  info "安装/更新 Xray"
   echo "----------------------------------------------------------------"
   bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
 
   echo
-  echo -e "${yellow}更新 geodata$none"
+  info "更新 geodata"
   echo "----------------------------------------------------------------"
   bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install-geodata
 }
 
-ensure_xray_ready() {
-  if is_xray_installed; then
-    return 0
+uninstall_all() {
+  local confirm
+
+  warn "此操作会卸载 Xray, 删除 ${CONFIG_FILE}, ${URL_FILE}, Xray 日志目录, 并移除脚本写入的 BBR sysctl 行。"
+  read -r -p "确认卸载请输入 YES: " confirm
+  if [[ "${confirm}" != "YES" ]]; then
+    warn "已取消卸载"
+    return 1
   fi
 
-  warn "未检测到 xray，配置前先自动安装一次"
-  install_or_update_xray
+  if command -v curl >/dev/null 2>&1; then
+    bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ remove --purge
+  else
+    warn "未检测到 curl, 跳过官方 Xray 卸载脚本"
+  fi
+
+  rm -f "${URL_FILE}"
+  rm -f "${HOME}/_vless_reality_url_"
+  rm -f "/root/_vless_reality_url_" 2>/dev/null || true
+  rm -rf /usr/local/etc/xray /var/log/xray /run/xray
+  rm -f menu.sh
+
+  if [[ -f /etc/sysctl.conf ]]; then
+    sed -i '/net.ipv4.tcp_congestion_control[[:space:]]*=[[:space:]]*bbr/d' /etc/sysctl.conf
+    sed -i '/net.core.default_qdisc[[:space:]]*=[[:space:]]*fq/d' /etc/sysctl.conf
+    sysctl -p >/dev/null 2>&1 || true
+  fi
+
+  echo -e "${green}卸载完成${none}"
 }
 
-# 确保有 curl 和 wget
-apt-get -y install curl wget jq -qq
-
-# 说明
-echo
-echo -e "$yellow此脚本仅兼容于Debian 10+系统. 如果你的系统不符合,请Ctrl+C退出脚本$none"
-echo -e "可以去 ${cyan}https://github.com/l1uz3/xray-vless-reality${none} 查看脚本整体思路和关键命令, 以便针对你自己的系统做出调整."
-echo -e "有问题加群 ${cyan}https://t.me/+q5WPfGjtwukyZjhl${none}"
-echo -e "本脚本支持带参数执行, 省略交互过程, 详见GitHub."
-echo "----------------------------------------------------------------"
-
-# 本机 IP
-InFaces=($(ls /sys/class/net/ | grep -E '^(eth|ens|eno|esp|enp|venet|vif)'))
-
-for i in "${InFaces[@]}"; do  # 从网口循环获取IP
-    # 增加超时时间, 以免在某些网络环境下请求IPv6等待太久
-    Public_IPv4=$(curl -4s --interface "$i" -m 2 https://www.cloudflare.com/cdn-cgi/trace | grep -oP "ip=\K.*$")
-    Public_IPv6=$(curl -6s --interface "$i" -m 2 https://www.cloudflare.com/cdn-cgi/trace | grep -oP "ip=\K.*$")
-
-    if [[ -n "$Public_IPv4" ]]; then  # 检查是否获取到IP地址
-        IPv4="$Public_IPv4"
-    fi
-    if [[ -n "$Public_IPv6" ]]; then  # 检查是否获取到IP地址            
-        IPv6="$Public_IPv6"
-    fi
-done
-
-# 通过IP, host, 时区, 生成UUID. 重装脚本不改变, 不改变节点信息, 方便个人使用
-uuidSeed=${IPv4}${IPv6}$(cat /proc/sys/kernel/hostname)$(timedatectl | awk '/Time zone/ {print $3}')
-default_uuid=$(curl -sL https://www.uuidtools.com/api/generate/v3/namespace/ns:dns/name/${uuidSeed} | grep -oP '[^-]{8}-[^-]{4}-[^-]{4}-[^-]{4}-[^-]{12}')
-
-# 如果你想使用纯随机的UUID
-# default_uuid=$(cat /proc/sys/kernel/random/uuid)
-
-extra_uuid_arg=""
-landing_count_arg=""
-warp_mode_arg=""
-quick_mode=""
-quick_extra_uuid_count=0
-quick_landing_count=0
-entry_mode=1
-
-# 执行脚本带参数
-if [ $# -ge 1 ]; then
-    # 第1个参数是搭在ipv4还是ipv6上
-    case ${1} in
-    4)
-        netstack=4
-        ip=${IPv4}
-        ;;
-    6)
-        netstack=6
-        ip=${IPv6}
-        ;;
-    *) # initial
-        if [[ -n "$IPv4" ]]; then  # 检查是否获取到IP地址
-            netstack=4
-            ip=${IPv4}
-        elif [[ -n "$IPv6" ]]; then  # 检查是否获取到IP地址            
-            netstack=6
-            ip=${IPv6}
-        else
-            warn "没有获取到公共IP"
-        fi
-        ;;
-    esac
-
-    # 第2个参数是port
-    port=${2}
-    if [[ -z $port ]]; then
-      port=443
-    fi
-
-    # 第3个参数是域名
-    domain=${3}
-    if [[ -z $domain ]]; then
-      domain="learn.microsoft.com"
-    fi
-
-    # 第4个参数是UUID
-    uuid=${4}
-    if [[ -z $uuid ]]; then
-        uuid=${default_uuid}
-    fi
-
-    # 第5个参数是额外UUID, 支持两种格式:
-    # 1) 纯数字: 自动生成对应数量的额外UUID
-    # 2) 逗号分隔的UUID列表
-    extra_uuid_arg=${5}
-
-    # 第6个参数是落地节点数量(可选)
-    landing_count_arg=${6}
-
-    # 第7个参数是WARP模式(可选)
-    # 1=跳过 2=WARP IPv4 3=WARP IPv6 4=自动
-    warp_mode_arg=${7}
-
-    echo -e "$yellow netstack = ${cyan}${netstack}${none}"
-    echo -e "$yellow 本机IP = ${cyan}${ip}${none}"
-    echo -e "$yellow 端口 (Port) = ${cyan}${port}${none}"
-    echo -e "$yellow 用户ID (User ID / UUID) = $cyan${uuid}${none}"
-    echo -e "$yellow SNI = ${cyan}$domain${none}"
-    if [[ -n "${extra_uuid_arg}" ]]; then
-      echo -e "$yellow 额外UUID参数 (Extra UUID arg) = ${cyan}${extra_uuid_arg}${none}"
-    fi
-    if [[ -n "${landing_count_arg}" ]]; then
-      echo -e "$yellow 落地节点数量参数 (Landing Count arg) = ${cyan}${landing_count_arg}${none}"
-    fi
-    if [[ -n "${warp_mode_arg}" ]]; then
-      echo -e "$yellow WARP参数 (Warp arg) = ${cyan}${warp_mode_arg}${none}"
-    fi
-    echo "----------------------------------------------------------------"
-fi
-
-# 主菜单入口(仅交互模式)
-if [[ $# -lt 1 ]]; then
-  echo
-  echo -e "$yellow 功能菜单 $none"
-  echo -e "${cyan}1${none}. 配置/重建节点配置"
-  echo -e "${cyan}2${none}. 安装/更新 Xray"
-  echo -e "${cyan}3${none}. 节点管理(查看/删除/修改UUID)"
-
+main_menu() {
   while :; do
-    read -p "$(echo -e "请选择功能 [1-3] (默认Default ${cyan}1${none}):")" entry_mode
-    [ -z "${entry_mode}" ] && entry_mode=1
-    case ${entry_mode} in
-    1 | 2 | 3)
-      break
-      ;;
-    *)
-      error
-      ;;
-    esac
-  done
-fi
-
-if [[ ${entry_mode} == 2 ]]; then
-  pause
-  install_or_update_xray
-  exit 0
-fi
-
-if [[ ${entry_mode} == 3 ]]; then
-  node_management_menu
-  exit 0
-fi
-
-pause
-
-if [[ $# -lt 1 ]]; then
-  ensure_xray_ready
-else
-  install_or_update_xray
-fi
-
-# 如果脚本带参数执行的, 要在安装了xray之后再生成默认私钥公钥shortID
-if [[ -n $uuid ]]; then
-  # 私钥种子
-  # x25519对私钥有一定要求, 不是任意随机的都满足要求, 所以下面这个字符串只能当作种子看待
-  reality_key_seed=$(echo -n ${uuid} | md5sum | head -c 32 | base64 -w 0 | tr '+/' '-_' | tr -d '=')
-
-  # 生成私钥公钥
-  # xray x25519 如果接收一个合法的私钥, 会生成对应的公钥. 如果接收一个非法的私钥, 会先"修正"为合法的私钥. 这个"修正"的过程, 会修改其中的一些字节
-  # https://github.dev/XTLS/Xray-core/blob/6830089d3c42483512842369c908f9de75da2eaa/main/commands/all/curve25519.go#L36
-  tmp_key=$(echo -n ${reality_key_seed} | xargs xray x25519 -i)
-  private_key=$(echo ${tmp_key} | awk '{print $2}')
-  public_key=$(echo ${tmp_key} | awk '{print $4}')
-
-  # ShortID
-  shortid=$(echo -n ${uuid} | sha1sum | head -c 16)
-  
-  echo
-  echo "私钥公钥要在安装xray之后才可以生成"
-  echo -e "$yellow 私钥 (PrivateKey) = ${cyan}${private_key}${none}"
-  echo -e "$yellow 公钥 (PublicKey) = ${cyan}${public_key}${none}"
-  echo -e "$yellow ShortId = ${cyan}${shortid}${none}"
-  echo "----------------------------------------------------------------"
-fi
-
-# 打开BBR
-echo
-echo -e "$yellow打开BBR$none"
-echo "----------------------------------------------------------------"
-sed -i '/net.ipv4.tcp_congestion_control/d' /etc/sysctl.conf
-sed -i '/net.core.default_qdisc/d' /etc/sysctl.conf
-echo "net.ipv4.tcp_congestion_control = bbr" >>/etc/sysctl.conf
-echo "net.core.default_qdisc = fq" >>/etc/sysctl.conf
-sysctl -p >/dev/null 2>&1
-
-# 配置 VLESS_Reality 模式, 需要:端口, UUID, x25519公私钥, 目标网站
-echo
-echo -e "$yellow配置 VLESS_Reality 模式$none"
-echo "----------------------------------------------------------------"
-
-# 网络栈
-if [[ -z $netstack ]]; then
-  echo
-  echo -e "如果你的小鸡是${magenta}双栈(同时有IPv4和IPv6的IP)${none}，请选择你把Xray搭在哪个'网口'上"
-  echo "如果你不懂这段话是什么意思, 请直接回车"
-  read -p "$(echo -e "Input ${cyan}4${none} for IPv4, ${cyan}6${none} for IPv6:") " netstack
-
-  if [[ $netstack == "4" ]]; then
-    ip=${IPv4}
-  elif [[ $netstack == "6" ]]; then
-    ip=${IPv6}
-  else
-    if [[ -n "$IPv4" ]]; then
-      ip=${IPv4}
-      netstack=4
-    elif [[ -n "$IPv6" ]]; then
-      ip=${IPv6}
-      netstack=6
-    else
-      warn "没有获取到公共IP"
-    fi
-  fi
-fi
-
-# 快捷菜单(仅交互模式)
-if [[ $# -lt 1 ]]; then
-  echo
-  echo -e "$yellow 快捷模式选择 $none"
-  echo -e "${cyan}1${none}. 基础模式: 主UUID直连"
-  echo -e "${cyan}2${none}. 落地模式: 主UUID直连 + 额外UUID + ss/socks5落地"
-
-  while :; do
-    read -p "$(echo -e "请选择模式 [1-2] (默认Default ${cyan}1${none}):")" quick_mode
-    [ -z "${quick_mode}" ] && quick_mode=1
-    case ${quick_mode} in
-    1 | 2)
-      break
-      ;;
-    *)
-      error
-      ;;
-    esac
-  done
-
-  if [[ ${quick_mode} == "2" ]]; then
-    while :; do
-      read -p "$(echo -e "请输入额外UUID数量(默认Default ${cyan}1${none}):")" quick_extra_uuid_count
-      [ -z "${quick_extra_uuid_count}" ] && quick_extra_uuid_count=1
-      case ${quick_extra_uuid_count} in
-      '' | *[!0-9]*)
-        error
-        ;;
-      0)
-        warn "落地模式下额外UUID数量建议大于0"
-        ;;
-      *)
-        break
-        ;;
-      esac
-    done
-  fi
-
-  if [[ ${quick_mode} == "2" ]]; then
-    while :; do
-      read -p "$(echo -e "请输入落地节点数量(默认Default ${cyan}${quick_extra_uuid_count}${none}):")" quick_landing_count
-      [ -z "${quick_landing_count}" ] && quick_landing_count=${quick_extra_uuid_count}
-      case ${quick_landing_count} in
-      '' | *[!0-9]*)
-        error
-        ;;
-      0)
-        warn "落地模式下落地节点数量建议大于0"
-        ;;
-      *)
-        break
-        ;;
-      esac
-    done
-  fi
-fi
-
-# 端口
-if [[ -z $port ]]; then
-  default_port=443
-  while :; do
-    read -p "$(echo -e "请输入端口 [${magenta}1-65535${none}] Input port (默认Default ${cyan}${default_port}$none):")" port
-    [ -z "$port" ] && port=$default_port
-    if is_valid_port "$port"; then
-      echo
-      echo
-      echo -e "$yellow 端口 (Port) = ${cyan}${port}${none}"
-      echo "----------------------------------------------------------------"
-      echo
-      break
-    else
-      error
-    fi
-  done
-fi
-
-# Xray UUID
-if [[ -z $uuid ]]; then
-  while :; do
-    echo -e "请输入 "$yellow"UUID"$none" "
-    read -p "$(echo -e "(默认ID: ${cyan}${default_uuid}$none):")" uuid
-    [ -z "$uuid" ] && uuid=$default_uuid
-    uuid=$(echo -n "$uuid" | tr 'A-Z' 'a-z' | tr -d '[:space:]')
-    if is_valid_uuid "$uuid"; then
-      echo
-      echo
-      echo -e "$yellow UUID = $cyan$uuid$none"
-      echo "----------------------------------------------------------------"
-      echo
-      break
-    else
-      error
-    fi
-  done
-fi
-
-# WARP菜单
-if [[ -n "${warp_mode_arg}" ]]; then
-  warp_mode="${warp_mode_arg}"
-elif [[ $# -lt 1 ]]; then
-  echo
-  echo -e "$yellow WARP 选项 $none"
-  echo -e "${cyan}1${none}. 跳过WARP"
-  echo -e "${cyan}2${none}. 安装WARP IPv4出站"
-  echo -e "${cyan}3${none}. 安装WARP IPv6出站"
-  echo -e "${cyan}4${none}. 自动(IPv6入站->WARP4, IPv4入站->WARP6)"
-
-  while :; do
-    read -p "$(echo -e "请选择 [1-4] (默认Default ${cyan}1${none}):")" warp_mode
-    [ -z "${warp_mode}" ] && warp_mode=1
-    case ${warp_mode} in
-    1 | 2 | 3 | 4)
-      break
-      ;;
-    *)
-      error
-      ;;
-    esac
-  done
-else
-  # 带参数模式默认保持历史行为: 自动按入站栈推荐WARP方向
-  warp_mode=4
-fi
-
-# 额外UUID(多入口): 同一个端口, 不同UUID
-extra_uuids=()
-if [[ -n "${extra_uuid_arg}" ]]; then
-  if [[ "${extra_uuid_arg}" =~ ^[0-9]+$ ]]; then
-    for ((i=1; i<=extra_uuid_arg; i++)); do
-      extra_uuids+=("$(cat /proc/sys/kernel/random/uuid)")
-    done
-  else
-    IFS=',' read -r -a parsed_extra_uuids <<< "${extra_uuid_arg}"
-    for one_uuid in "${parsed_extra_uuids[@]}"; do
-      one_uuid=$(echo -n "${one_uuid}" | tr 'A-Z' 'a-z' | tr -d '[:space:]')
-      [[ -z "${one_uuid}" ]] && continue
-      if is_valid_uuid "${one_uuid}"; then
-        extra_uuids+=("${one_uuid}")
-      else
-        warn "跳过无效的额外UUID: ${one_uuid}"
-      fi
-    done
-  fi
-elif [[ $# -lt 1 ]]; then
-  for ((i=1; i<=quick_extra_uuid_count; i++)); do
-    extra_uuids+=("$(cat /proc/sys/kernel/random/uuid)")
-  done
-fi
-
-# 合并主UUID与额外UUID, 并去重
-all_uuids=("${uuid}")
-for one_uuid in "${extra_uuids[@]}"; do
-  if [[ "${one_uuid}" == "${uuid}" ]]; then
-    warn "跳过与主UUID重复的额外UUID: ${one_uuid}"
-    continue
-  fi
-
-  duplicated=0
-  for existing_uuid in "${all_uuids[@]}"; do
-    if [[ "${existing_uuid}" == "${one_uuid}" ]]; then
-      duplicated=1
-      break
-    fi
-  done
-
-  if [[ ${duplicated} -eq 0 ]]; then
-    all_uuids+=("${one_uuid}")
-  fi
-done
-
-# 落地节点配置: 支持 socks5 / shadowsocks
-landing_count=0
-landing_outbound_entries=()
-landing_rule_entries=()
-landing_map_notes=()
-
-if [[ -n "${landing_count_arg}" ]]; then
-  if [[ "${landing_count_arg}" =~ ^[0-9]+$ ]]; then
-    landing_count=${landing_count_arg}
-  else
-    warn "落地节点数量参数无效, 已按0处理: ${landing_count_arg}"
-  fi
-elif [[ $# -lt 1 ]]; then
-  landing_count=${quick_landing_count}
-fi
-
-if [[ ${landing_count} -gt 0 ]]; then
-  while [[ $((${#all_uuids[@]} - 1)) -lt ${landing_count} ]]; do
-    all_uuids+=("$(cat /proc/sys/kernel/random/uuid)")
-  done
-
-  for ((landing_idx=1; landing_idx<=landing_count; landing_idx++)); do
-    bind_uuid=${all_uuids[$landing_idx]}
-    landing_tag="landing-${landing_idx}"
-    landing_email="landing-user-${landing_idx}"
-
     echo
-    echo -e "$yellow 配置落地节点 ${cyan}${landing_idx}${yellow} (绑定UUID: ${cyan}${bind_uuid}${yellow})$none"
-    echo "----------------------------------------------------------------"
+    info "主页"
+    echo -e "${cyan}1${none}. 安装节点"
+    echo -e "${cyan}2${none}. 节点管理"
+    echo -e "${cyan}3${none}. 安装/更新 Xray"
+    echo -e "${cyan}4${none}. 卸载"
+    echo -e "${cyan}5${none}. 退出"
 
-    while :; do
-      echo -e "${cyan}1${none}. socks5"
-      echo -e "${cyan}2${none}. shadowsocks"
-      read -p "$(echo -e "请选择落地类型 [1-2] (默认Default ${cyan}1${none}):")" landing_type_choose
-      [ -z "${landing_type_choose}" ] && landing_type_choose=1
-      case ${landing_type_choose} in
-      1)
-        landing_type="socks5"
-        break
-        ;;
-      2)
-        landing_type="ss"
-        break
-        ;;
-      *)
-        error
-        ;;
-      esac
-    done
-
-    while :; do
-      read -p "请输入落地地址 (address): " landing_address
-      landing_address=$(echo -n "${landing_address}" | tr -d '[:space:]')
-      if [[ -n "${landing_address}" ]]; then
-        break
-      fi
-      error
-    done
-
-    while :; do
-      read -p "$(echo -e "请输入落地端口 [${magenta}1-65535${none}] (默认Default ${cyan}443${none}):")" landing_port
-      [ -z "${landing_port}" ] && landing_port=443
-      if is_valid_port "${landing_port}"; then
-        break
-      fi
-      error
-    done
-
-    escaped_address=$(json_escape "${landing_address}")
-    if [[ "${landing_type}" == "socks5" ]]; then
-      while :; do
-        read -p "请输入Socks5用户名 (可留空): " landing_user
-        read -p "请输入Socks5密码 (可留空): " landing_pass
-        if [[ -z "${landing_user}" && -z "${landing_pass}" ]]; then
-          break
-        fi
-        if [[ -n "${landing_user}" && -n "${landing_pass}" ]]; then
-          break
-        fi
-        warn "用户名和密码需要同时填写或同时留空"
-      done
-
-      if [[ -n "${landing_user}" ]]; then
-        escaped_user=$(json_escape "${landing_user}")
-        escaped_pass=$(json_escape "${landing_pass}")
-        landing_outbound_entry=$(cat <<EOF
-    {
-      "protocol": "socks",
-      "settings": {
-        "servers": [{
-          "address": "${escaped_address}",
-          "port": ${landing_port},
-          "users": [{
-            "user": "${escaped_user}",
-            "pass": "${escaped_pass}"
-          }]
-        }]
-      },
-      "tag": "${landing_tag}"
-    }
-EOF
-)
-        landing_map_notes+=("落地节点${landing_idx}: UUID=${bind_uuid} -> socks5://${landing_address}:${landing_port} (auth)")
-      else
-        landing_outbound_entry=$(cat <<EOF
-    {
-      "protocol": "socks",
-      "settings": {
-        "servers": [{
-          "address": "${escaped_address}",
-          "port": ${landing_port}
-        }]
-      },
-      "tag": "${landing_tag}"
-    }
-EOF
-)
-        landing_map_notes+=("落地节点${landing_idx}: UUID=${bind_uuid} -> socks5://${landing_address}:${landing_port}")
-      fi
-    else
-      while :; do
-        read -p "$(echo -e "请输入SS加密方式 (默认Default ${cyan}aes-128-gcm${none}):")" landing_method
-        [ -z "${landing_method}" ] && landing_method="aes-128-gcm"
-        landing_method=$(echo -n "${landing_method}" | tr -d '[:space:]')
-        if [[ -n "${landing_method}" ]]; then
-          break
-        fi
-        error
-      done
-
-      while :; do
-        read -p "请输入SS密码: " landing_pass
-        if [[ -n "${landing_pass}" ]]; then
-          break
-        fi
-        error
-      done
-
-      escaped_method=$(json_escape "${landing_method}")
-      escaped_pass=$(json_escape "${landing_pass}")
-      landing_outbound_entry=$(cat <<EOF
-    {
-      "protocol": "shadowsocks",
-      "settings": {
-        "servers": [{
-          "address": "${escaped_address}",
-          "port": ${landing_port},
-          "method": "${escaped_method}",
-          "password": "${escaped_pass}"
-        }]
-      },
-      "tag": "${landing_tag}"
-    }
-EOF
-)
-      landing_map_notes+=("落地节点${landing_idx}: UUID=${bind_uuid} -> ss://${landing_address}:${landing_port} (${landing_method})")
-    fi
-
-    landing_rule_entry=$(cat <<EOF
-      {
-        "type": "field",
-        "user": ["${landing_email}"],
-        "outboundTag": "${landing_tag}"
-      }
-EOF
-)
-    landing_outbound_entries+=("${landing_outbound_entry}")
-    landing_rule_entries+=("${landing_rule_entry}")
+    case "$(read_choice "请选择" "1" 1 5)" in
+    1)
+      install_nodes
+      ;;
+    2)
+      node_management_menu
+      ;;
+    3)
+      install_or_update_xray
+      ;;
+    4)
+      uninstall_all
+      ;;
+    5)
+      exit 0
+      ;;
+    esac
   done
-fi
-
-extra_uuid_count=$((${#all_uuids[@]} - 1))
-if [[ ${extra_uuid_count} -gt 0 ]]; then
-  echo
-  echo -e "$yellow 已增加 ${cyan}${extra_uuid_count}${yellow} 个额外UUID(同端口)$none"
-  echo "----------------------------------------------------------------"
-fi
-
-if [[ ${landing_count} -gt 0 ]]; then
-  echo
-  echo -e "$yellow 已配置 ${cyan}${landing_count}${yellow} 个落地节点(支持ss/socks5)$none"
-  for landing_note in "${landing_map_notes[@]}"; do
-    echo -e "$yellow ${landing_note}${none}"
-  done
-  echo "----------------------------------------------------------------"
-fi
-
-# x25519公私钥
-if [[ -z $private_key ]]; then
-  # 私钥种子
-  # x25519对私钥有一定要求, 不是任意随机的都满足要求, 所以下面这个字符串只能当作种子看待
-  reality_key_seed=$(echo -n ${uuid} | md5sum | head -c 32 | base64 -w 0 | tr '+/' '-_' | tr -d '=')
-
-  # 生成私钥公钥
-  # xray x25519 如果接收一个合法的私钥, 会生成对应的公钥. 如果接收一个非法的私钥, 会先"修正"为合法的私钥. 这个"修正"的过程, 会修改其中的一些字节
-  # https://github.dev/XTLS/Xray-core/blob/6830089d3c42483512842369c908f9de75da2eaa/main/commands/all/curve25519.go#L36
-  tmp_key=$(echo -n ${reality_key_seed} | xargs xray x25519 -i)
-  default_private_key=$(echo ${tmp_key} | awk '{print $2}')
-  default_public_key=$(echo ${tmp_key} | awk '{print $4}')
-  
-  echo -e "请输入 "$yellow"x25519 Private Key"$none" x25519私钥 :"
-  read -p "$(echo -e "(默认私钥 Private Key: ${cyan}${default_private_key}$none):")" private_key
-  if [[ -z "$private_key" ]]; then 
-    private_key=$default_private_key
-    public_key=$default_public_key
-  else
-    tmp_key=$(echo -n ${private_key} | xargs xray x25519 -i)
-    private_key=$(echo ${tmp_key} | awk '{print $2}')
-    public_key=$(echo ${tmp_key} | awk '{print $4}')
-  fi
-
-  echo
-  echo 
-  echo -e "$yellow 私钥 (PrivateKey) = ${cyan}${private_key}$none"
-  echo -e "$yellow 公钥 (PublicKey) = ${cyan}${public_key}$none"
-  echo "----------------------------------------------------------------"
-  echo
-fi
-
-# ShortID
-if [[ -z $shortid ]]; then
-  default_shortid=$(echo -n ${uuid} | sha1sum | head -c 16)
-  while :; do
-    echo -e "请输入 "$yellow"ShortID"$none" :"
-    read -p "$(echo -e "(默认ShortID: ${cyan}${default_shortid}$none):")" shortid
-    [ -z "$shortid" ] && shortid=$default_shortid
-    if [[ ${#shortid} -gt 16 ]]; then
-      error
-      continue
-    elif [[ $(( ${#shortid} % 2 )) -ne 0 ]]; then
-      # 字符串包含奇数个字符
-      error
-      continue
-    else
-      # 字符串包含偶数个字符
-      echo
-      echo
-      echo -e "$yellow ShortID = ${cyan}${shortid}$none"
-      echo "----------------------------------------------------------------"
-      echo
-      break
-    fi
-  done
-fi
-
-# 目标网站
-if [[ -z $domain ]]; then
-  echo -e "请输入一个 ${magenta}合适的域名${none} Input the domain"
-  read -p "(例如: learn.microsoft.com): " domain
-  [ -z "$domain" ] && domain="learn.microsoft.com"
-
-  echo
-  echo
-  echo -e "$yellow SNI = ${cyan}$domain$none"
-  echo "----------------------------------------------------------------"
-  echo
-fi
-
-# 配置config.json
-echo
-echo -e "$yellow 配置 /usr/local/etc/xray/config.json $none"
-echo "----------------------------------------------------------------"
-
-clients_json=$(for idx in "${!all_uuids[@]}"; do
-  client_uuid="${all_uuids[$idx]}"
-  if [[ $idx -gt 0 ]]; then
-    printf ",\n"
-  fi
-  printf "          {\n"
-  printf '            "id": "%s",\n' "${client_uuid}"
-  printf '            "flow": "xtls-rprx-vision"'
-  if [[ $idx -ge 1 && $idx -le $landing_count ]]; then
-    printf ",\n"
-    printf '            "email": "landing-user-%s"\n' "${idx}"
-  else
-    printf "\n"
-  fi
-  printf "          }"
-done)
-
-landing_outbounds_json=""
-for idx in "${!landing_outbound_entries[@]}"; do
-  if [[ $idx -gt 0 ]]; then
-    landing_outbounds_json+=$',\n'
-  fi
-  landing_outbounds_json+="${landing_outbound_entries[$idx]}"
-done
-if [[ -n "${landing_outbounds_json}" ]]; then
-  landing_outbounds_json+=$',\n'
-fi
-
-landing_routing_rules_json=""
-for idx in "${!landing_rule_entries[@]}"; do
-  if [[ $idx -gt 0 ]]; then
-    landing_routing_rules_json+=$',\n'
-  fi
-  landing_routing_rules_json+="${landing_rule_entries[$idx]}"
-done
-
-cat > /usr/local/etc/xray/config.json <<-EOF
-{ // VLESS + Reality
-  "log": {
-    "access": "/var/log/xray/access.log",
-    "error": "/var/log/xray/error.log",
-    "loglevel": "warning"
-  },
-  "inbounds": [
-    // [inbound] 如果你想使用其它翻墙服务端如(HY2或者NaiveProxy)对接v2ray的分流规则, 那么取消下面一段的注释, 并让其它翻墙服务端接到下面这个socks 1080端口
-    // {
-    //   "listen":"127.0.0.1",
-    //   "port":1080,
-    //   "protocol":"socks",
-    //   "sniffing":{
-    //     "enabled":true,
-    //     "destOverride":[
-    //       "http",
-    //       "tls"
-    //     ]
-    //   },
-    //   "settings":{
-    //     "auth":"noauth",
-    //     "udp":false
-    //   }
-    // },
-    {
-      "listen": "0.0.0.0",
-      "port": ${port},    // ***
-      "protocol": "vless",
-      "settings": {
-        "clients": [
-${clients_json}
-        ],
-        "decryption": "none"
-      },
-      "streamSettings": {
-        "network": "tcp",
-        "security": "reality",
-        "realitySettings": {
-          "show": false,
-          "dest": "${domain}:443",    // ***
-          "xver": 0,
-          "serverNames": ["${domain}"],    // ***
-          "privateKey": "${private_key}",    // ***私钥
-          "shortIds": ["${shortid}"]    // ***
-        }
-      },
-      "sniffing": {
-        "enabled": true,
-        "destOverride": ["http", "tls", "quic"]
-      }
-    }
-  ],
-  "outbounds": [
-    {
-      "protocol": "freedom",
-      "tag": "direct"
-    },
-// [outbound]
-{
-    "protocol": "freedom",
-    "settings": {
-        "domainStrategy": "UseIPv4"
-    },
-    "tag": "force-ipv4"
-},
-{
-    "protocol": "freedom",
-    "settings": {
-        "domainStrategy": "UseIPv6"
-    },
-    "tag": "force-ipv6"
-},
-{
-    "protocol": "socks",
-    "settings": {
-        "servers": [{
-            "address": "127.0.0.1",
-            "port": 40000 //warp socks5 port
-        }]
-     },
-    "tag": "socks5-warp"
-},
-${landing_outbounds_json}
-    {
-      "protocol": "blackhole",
-      "tag": "block"
-    }
-  ],
-  "dns": {
-    "servers": [
-      "8.8.8.8",
-      "1.1.1.1",
-      "2001:4860:4860::8888",
-      "2606:4700:4700::1111",
-      "localhost"
-    ]
-  },
-  "routing": {
-    "domainStrategy": "IPIfNonMatch",
-    "rules": [
-${landing_routing_rules_json}
-    ]
-  }
 }
-EOF
 
-# 重启 Xray
-echo
-echo -e "$yellow重启 Xray$none"
-echo "----------------------------------------------------------------"
-service xray restart
-
-# 指纹FingerPrint
-fingerprint="random"
-
-# SpiderX
-spiderx=""
-
-echo
-echo "---------- Xray 配置信息 -------------"
-echo -e "$green ---提示..这是 VLESS Reality 服务器配置--- $none"
-echo -e "$yellow 地址 (Address) = $cyan${ip}$none"
-echo -e "$yellow 端口 (Port) = ${cyan}${port}${none}"
-echo -e "$yellow 主用户ID (Primary UUID) = $cyan${uuid}$none"
-if [[ ${extra_uuid_count} -gt 0 ]]; then
-  echo -e "$yellow 额外UUID数量 (Extra UUID Count) = ${cyan}${extra_uuid_count}${none}"
-fi
-echo -e "$yellow 流控 (Flow) = ${cyan}xtls-rprx-vision${none}"
-echo -e "$yellow 加密 (Encryption) = ${cyan}none${none}"
-echo -e "$yellow 传输协议 (Network) = ${cyan}tcp$none"
-echo -e "$yellow 伪装类型 (header type) = ${cyan}none$none"
-echo -e "$yellow 底层传输安全 (TLS) = ${cyan}reality$none"
-echo -e "$yellow SNI = ${cyan}${domain}$none"
-echo -e "$yellow 指纹 (Fingerprint) = ${cyan}${fingerprint}$none"
-echo -e "$yellow 公钥 (PublicKey) = ${cyan}${public_key}$none"
-echo -e "$yellow ShortId = ${cyan}${shortid}$none"
-echo -e "$yellow SpiderX = ${cyan}${spiderx}$none"
-echo
-echo "---------- VLESS Reality URL ----------"
-url_ip=${ip}
-if [[ $netstack == "6" ]]; then
-  url_ip=[${ip}]
+if [[ "${XRAY_SCRIPT_SOURCE_ONLY:-0}" == "1" ]]; then
+  return 0 2>/dev/null || exit 0
 fi
 
-# 节点信息保存到文件中
-: > ~/_vless_reality_url_
-
-for idx in "${!all_uuids[@]}"; do
-  current_uuid=${all_uuids[$idx]}
-  if [[ $idx -eq 0 ]]; then
-    node_title="主节点"
-    node_tag="PRIMARY"
-  else
-    node_title="额外节点${idx}"
-    node_tag="EXTRA_${idx}"
-  fi
-
-  node_outbound="direct"
-  if [[ $idx -ge 1 && $idx -le $landing_count ]]; then
-    node_outbound="landing-${idx}"
-  fi
-
-  current_url="vless://${current_uuid}@${url_ip}:${port}?flow=xtls-rprx-vision&encryption=none&type=tcp&security=reality&sni=${domain}&fp=${fingerprint}&pbk=${public_key}&sid=${shortid}&spx=${spiderx}#${node_tag}_${url_ip}"
-
-  echo -e "$yellow ${node_title} UUID = ${cyan}${current_uuid}${none}"
-  echo -e "$yellow ${node_title} 出站 (Outbound) = ${cyan}${node_outbound}${none}"
-  echo -e "${cyan}${current_url}${none}"
-  echo
-
-  echo "${node_title} (${node_outbound}): ${current_url}" >> ~/_vless_reality_url_
-  echo >> ~/_vless_reality_url_
-done
-
-echo "---------- END -------------"
-echo "以上节点信息保存在 ~/_vless_reality_url_ 中"
-
-# WARP处理
-warp_install_target="none"
-case ${warp_mode} in
-1)
-  warp_install_target="none"
-  ;;
-2)
-  warp_install_target="4"
-  ;;
-3)
-  warp_install_target="6"
-  ;;
-4)
-  if [[ $netstack == "6" ]]; then
-    warp_install_target="4"
-  elif [[ $netstack == "4" ]]; then
-    warp_install_target="6"
-  fi
-  ;;
-*)
-  warn "WARP选项无效, 已跳过WARP安装"
-  warp_install_target="none"
-  ;;
-esac
-
-if [[ ${warp_install_target} == "4" ]]; then
-  echo
-  echo -e "$yellow将安装 WARP IPv4 出站$none"
-  echo "----------------------------------------------------------------"
-  if [[ $# -lt 1 ]]; then
-    pause
-  fi
-  install_warp_by_stack 4
-  restart_xray_service
-elif [[ ${warp_install_target} == "6" ]]; then
-  echo
-  echo -e "$yellow将安装 WARP IPv6 出站$none"
-  echo "----------------------------------------------------------------"
-  if [[ $# -lt 1 ]]; then
-    pause
-  fi
-  install_warp_by_stack 6
-  restart_xray_service
-else
-  echo
-  echo -e "$yellow已跳过WARP安装$none"
-fi
-
-echo
-echo "节点信息保存在 ~/_vless_reality_url_ 中"
+main_menu

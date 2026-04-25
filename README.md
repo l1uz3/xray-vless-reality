@@ -19,18 +19,18 @@ bash <(curl -L https://github.com/l1uz3/xray-vless-reality/raw/main/install.sh)
 
 脚本中很大部分都是在校验用户的输入。其实照着下面的步骤自己配置就行了。
 
-交互模式现在支持菜单化选择:
-1) 功能菜单:
-  - 1 安装/重建节点配置
-  - 2 节点管理(查看/删除额外节点/修改节点UUID)
-2) 安装快捷模式:
-  - 1 基础模式: 主UUID直连
-  - 2 落地模式: 主UUID直连 + 额外UUID + ss/socks5落地
-3) WARP菜单:
-  - 1 跳过WARP
-  - 2 安装WARP IPv4出站
-  - 3 安装WARP IPv6出站
-  - 4 自动(IPv6入站->WARP4, IPv4入站->WARP6)
+交互模式菜单:
+1) 安装节点
+  - 仅直连
+  - 直连加落地
+  - 此流程不会安装或更新 Xray, 如未安装请先使用菜单 3
+2) 节点管理
+  - 查看节点
+  - 修改节点: 从 UUID 到出站类型逐项询问, 直接回车保留当前值
+  - 删除节点: 所有节点都可以删除, 不再区分主节点
+  - 返回
+3) 安装/更新 Xray
+4) 卸载
 
 # 具体手搓步骤 (点击展开)
 <details>
@@ -168,47 +168,4 @@ bash <(curl -L git.io/warp.sh) 4
 </details>
 
 # Uninstall
-```
-bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ remove --purge
-```
-
-# 脚本支持带参数运行
-```
-bash <(curl -L https://github.com/l1uz3/xray-vless-reality/raw/main/install.sh) <netstack> [port] [domain] [UUID] [extraUUIDs] [landingCount] [warpOption]
-```
-
-其中, 
-
-`netstack` 6 表示 IPv6 入站; 4 表示 IPv4 入站.
-
-`port` 端口. 不写的话, 默认443
-
-`domain` 你指定的网站域名. 不写的话, 默认 learn.microsoft.com
-
-`UUID` 你的UUID. 不写的话, 自动生成
-
-`extraUUIDs` 额外UUID参数(可选). 支持两种格式:
-1) 传数字, 例如 `2` 表示一键自动生成2个额外UUID(同端口, 不同UUID)
-2) 传逗号分隔的UUID列表, 例如 `uuid1,uuid2`
-
-`landingCount` 落地节点数量(可选). 例如 `2` 表示配置2个落地节点。
-主UUID永远直连 (direct)。脚本会按顺序把前N个“额外UUID”绑定到落地节点 `landing-1...landing-N`，并在交互中逐个填写落地节点信息。
-落地类型支持 `socks5` 与 `shadowsocks`。
-
-`warpOption` WARP选项(可选):
-1) 跳过WARP
-2) 安装WARP IPv4出站
-3) 安装WARP IPv6出站
-4) 自动(IPv6入站->WARP4, IPv4入站->WARP6)
-
-例如,
-```
-bash <(curl -L https://github.com/l1uz3/xray-vless-reality/raw/main/install.sh) 6
-bash <(curl -L https://github.com/l1uz3/xray-vless-reality/raw/main/install.sh) 6 443
-bash <(curl -L https://github.com/l1uz3/xray-vless-reality/raw/main/install.sh) 6 443 learn.microsoft.com
-bash <(curl -L https://github.com/l1uz3/xray-vless-reality/raw/main/install.sh) 6 443 learn.microsoft.com 1b0b723f-0544-4f9c-8df8-2b8975c5e47a
-bash <(curl -L https://github.com/l1uz3/xray-vless-reality/raw/main/install.sh) 6 443 learn.microsoft.com 1b0b723f-0544-4f9c-8df8-2b8975c5e47a 2
-bash <(curl -L https://github.com/l1uz3/xray-vless-reality/raw/main/install.sh) 6 443 learn.microsoft.com 1b0b723f-0544-4f9c-8df8-2b8975c5e47a aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa,bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb
-bash <(curl -L https://github.com/l1uz3/xray-vless-reality/raw/main/install.sh) 6 443 learn.microsoft.com 1b0b723f-0544-4f9c-8df8-2b8975c5e47a 2 2
-bash <(curl -L https://github.com/l1uz3/xray-vless-reality/raw/main/install.sh) 6 443 learn.microsoft.com 1b0b723f-0544-4f9c-8df8-2b8975c5e47a 2 2 1
-```
+使用主菜单 4 卸载。卸载会调用 Xray 官方卸载脚本, 删除脚本生成的节点链接文件、Xray 配置/日志目录, 并移除脚本写入的 BBR sysctl 行。
