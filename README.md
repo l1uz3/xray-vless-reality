@@ -159,10 +159,6 @@ bash <(curl -L git.io/warp.sh) 4
 bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ remove --purge
 ```
 
-# 私货
-对于喜欢V2rayN PAC模式的朋友，欢迎使用支持Reality的 [v2rayN-3.29-VLESS](https://github.com/l1uz3/v2rayN-3.29-VLESS)
-![image](https://github.com/l1uz3/xray-vless-reality/assets/665889/c45c11a1-e326-4c70-9c55-8ec45608c472)
-
 # 脚本支持带参数运行
 ```
 bash <(curl -L https://github.com/l1uz3/xray-vless-reality/raw/main/install.sh) <netstack> [port] [domain] [UUID]
@@ -185,7 +181,3 @@ bash <(curl -L https://github.com/l1uz3/xray-vless-reality/raw/main/install.sh) 
 bash <(curl -L https://github.com/l1uz3/xray-vless-reality/raw/main/install.sh) 6 443 learn.microsoft.com
 bash <(curl -L https://github.com/l1uz3/xray-vless-reality/raw/main/install.sh) 6 443 learn.microsoft.com 1b0b723f-0544-4f9c-8df8-2b8975c5e47a
 ```
-
-
-# 用你的STAR告诉我这个Repo对你有用 Welcome STARs! :)
-[![Stargazers over time](https://starchart.cc/l1uz3/xray-vless-reality.svg)](https://starchart.cc/l1uz3/xray-vless-reality)
