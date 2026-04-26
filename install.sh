@@ -925,6 +925,19 @@ update_node_by_index() {
   local node_count
   local idx
   local tag
+  local current_address
+  local current_inbound_port
+  local current_domain
+  local current_private_key
+  local current_short_id
+  local default_private_key
+  local default_short_id
+  local new_address
+  local new_inbound_port
+  local new_domain
+  local new_private_key
+  local new_public_key
+  local new_short_id
   local new_uuid
   local duplicate_count
   local outbound_choice
@@ -949,6 +962,11 @@ update_node_by_index() {
   idx=$((idx_1based - 1))
   tag=$(node_outbound_tag "${jq_config_file}" "${idx}")
   node_current_details "${jq_config_file}" "${idx}" "${tag}"
+  current_address=$(extract_saved_address)
+  current_inbound_port=$(jq -r '.inbounds[0].port // 443' "${jq_config_file}")
+  current_domain=$(jq -r '.inbounds[0].streamSettings.realitySettings.serverNames[0] // ((.inbounds[0].streamSettings.realitySettings.dest // "") | sub(":[0-9]+$"; "")) // "learn.microsoft.com"' "${jq_config_file}")
+  current_private_key=$(jq -r '.inbounds[0].streamSettings.realitySettings.privateKey // empty' "${jq_config_file}")
+  current_short_id=$(jq -r '.inbounds[0].streamSettings.realitySettings.shortIds[0] // empty' "${jq_config_file}")
 
   echo
   info "修改节点${idx_1based}; 每项直接回车表示保留当前值"
@@ -959,6 +977,24 @@ update_node_by_index() {
     warn "UUID已存在, 不允许生成重复节点"
     return 1
   fi
+
+  new_address=$(read_required "请输入客户端连接地址(IP或域名)" "${current_address}")
+  new_address=$(normalize_url_address "${new_address}")
+  new_inbound_port=$(read_port "请输入 Xray 入站端口" "${current_inbound_port}")
+  new_domain=$(read_required "请输入 Reality SNI 域名" "${current_domain}")
+
+  default_private_key="${current_private_key}"
+  [[ -z "${default_private_key}" ]] && default_private_key=$(default_private_key_for_uuid "${new_uuid}")
+  read_private_key "${default_private_key}" || {
+    rm -f "${jq_config_file}"
+    return 1
+  }
+  new_private_key="${PRIVATE_KEY_RESULT}"
+  new_public_key="${PUBLIC_KEY_RESULT}"
+
+  default_short_id="${current_short_id}"
+  [[ -z "${default_short_id}" ]] && default_short_id=$(echo -n "${new_uuid}" | sha1sum | head -c 16)
+  new_short_id=$(read_short_id "${default_short_id}")
 
   echo -e "${cyan}1${none}. direct"
   echo -e "${cyan}2${none}. socks5"
@@ -1001,6 +1037,10 @@ update_node_by_index() {
     jq \
       --argjson idx "${idx}" \
       --arg uuid "${new_uuid}" \
+      --argjson port "${new_inbound_port}" \
+      --arg domain "${new_domain}" \
+      --arg private_key "${new_private_key}" \
+      --arg short_id "${new_short_id}" \
       --arg old_email "${CURRENT_EMAIL}" \
       --arg old_tag "${CURRENT_TAG}" '
         (.routing.rules //= [])
@@ -1010,6 +1050,11 @@ update_node_by_index() {
           else
             .
           end
+        | .inbounds[0].port = $port
+        | .inbounds[0].streamSettings.realitySettings.dest = ($domain + ":443")
+        | .inbounds[0].streamSettings.realitySettings.serverNames = [$domain]
+        | .inbounds[0].streamSettings.realitySettings.privateKey = $private_key
+        | .inbounds[0].streamSettings.realitySettings.shortIds = [$short_id]
         | .inbounds[0].settings.clients[$idx] = {id:$uuid,flow:"xtls-rprx-vision"}
         | if ($old_tag | test("^landing-")) and (([.routing.rules[]? | select(.outboundTag == $old_tag)] | length) == 0) then
             .outbounds |= map(select((.tag // "") != $old_tag))
@@ -1021,6 +1066,10 @@ update_node_by_index() {
     jq \
       --argjson idx "${idx}" \
       --arg uuid "${new_uuid}" \
+      --argjson port "${new_inbound_port}" \
+      --arg domain "${new_domain}" \
+      --arg private_key "${new_private_key}" \
+      --arg short_id "${new_short_id}" \
       --arg old_email "${CURRENT_EMAIL}" \
       --arg old_tag "${CURRENT_TAG}" \
       --arg email "${new_email}" \
@@ -1033,6 +1082,11 @@ update_node_by_index() {
           else
             .
           end
+        | .inbounds[0].port = $port
+        | .inbounds[0].streamSettings.realitySettings.dest = ($domain + ":443")
+        | .inbounds[0].streamSettings.realitySettings.serverNames = [$domain]
+        | .inbounds[0].streamSettings.realitySettings.privateKey = $private_key
+        | .inbounds[0].streamSettings.realitySettings.shortIds = [$short_id]
         | .inbounds[0].settings.clients[$idx] = {id:$uuid,flow:"xtls-rprx-vision",email:$email}
         | .routing.rules += [{type:"field",user:[$email],outboundTag:$tag}]
         | .outbounds |= map(select((.tag // "") != $tag))
@@ -1047,9 +1101,14 @@ update_node_by_index() {
 
   rm -f "${jq_config_file}"
   if replace_xray_config "${tmp_config}"; then
-    refresh_vless_url_file ""
+    refresh_vless_url_file "${new_address}"
     restart_xray_service
     echo -e "${green}已修改节点 ${idx_1based}${none}"
+    echo -e "${yellow}地址${none}: ${cyan}${new_address}${none}"
+    echo -e "${yellow}端口${none}: ${cyan}${new_inbound_port}${none}"
+    echo -e "${yellow}SNI${none}: ${cyan}${new_domain}${none}"
+    echo -e "${yellow}PublicKey${none}: ${cyan}${new_public_key}${none}"
+    echo -e "${yellow}ShortId${none}: ${cyan}${new_short_id}${none}"
   fi
 }
 

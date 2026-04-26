@@ -26,7 +26,7 @@ bash <(curl -L https://github.com/l1uz3/xray-vless-reality/raw/main/install.sh)
   - 此流程不会安装或更新 Xray, 如未安装请先使用菜单 3
 2) 节点管理
   - 查看节点
-  - 修改节点: 从 UUID 到出站类型逐项询问, 直接回车保留当前值
+  - 修改节点: UUID、客户端地址、入站端口、SNI、PrivateKey、ShortId、出站类型和落地参数都会逐项询问, 直接回车保留当前值
   - 删除节点: 所有节点都可以删除, 不再区分主节点
   - 返回
 3) 安装/更新 Xray
